@@ -1,0 +1,328 @@
+{
+  "nav": {
+    "dashboard": "Dashboard",
+    "cameras": "Cameras",
+    "smartCameras": "Smart Cameras",
+    "map": "Map",
+    "violations": "Violations",
+    "admin": "Administration",
+    "collapse": "Collapse"
+  },
+  "header": {
+    "search": "Search..."
+  },
+  "pages": {
+    "dashboard": {
+      "title": "Dashboard",
+      "description": "Overview of the Sergek surveillance system"
+    },
+    "cameras": {
+      "title": "Cameras",
+      "description": "View all 15 surveillance cameras"
+    },
+    "cameraDetail": {
+      "title": "Camera Details",
+      "description": "Viewing camera"
+    },
+    "smartCameras": {
+      "title": "Smart Cameras",
+      "description": "5 cameras with license plate recognition"
+    },
+    "map": {
+      "title": "Map",
+      "description": "Camera locations on the Shymkent map"
+    },
+    "violations": {
+      "title": "Violations",
+      "description": "violations found"
+    },
+    "violationDetail": {
+      "title": "Violation Details",
+      "description": "Viewing violation"
+    },
+    "admin": {
+      "title": "Administration",
+      "description": "System management"
+    },
+    "adminCameras": {
+      "title": "Camera Management",
+      "description": "Add, edit, and delete cameras"
+    },
+    "cameraForm": {
+      "createTitle": "Add Camera",
+      "editTitle": "Edit Camera",
+      "description": "Camera configuration form"
+    },
+    "vehicleDetail": {
+      "title": "Vehicle Information",
+      "description": "License plate:"
+    }
+  },
+  "common": {
+    "loading": "Loading...",
+    "saving": "Saving...",
+    "error": "Error",
+    "save": "Save",
+    "cancel": "Cancel",
+    "delete": "Delete",
+    "edit": "Edit",
+    "add": "Add",
+    "search": "Search",
+    "filter": "Filter",
+    "noData": "No data",
+    "retry": "Try again",
+    "dismiss": "Dismiss",
+    "reconnecting": "Reconnecting...",
+    "loadError": "Loading error",
+    "language": "Language"
+  },
+  "emptyStates": {
+    "cameras": {
+      "title": "No cameras found",
+      "description": "No cameras have been configured yet. Add cameras from the admin panel to start monitoring."
+    },
+    "detections": {
+      "title": "No detections",
+      "description": "No license plates have been detected yet. Detections will appear here when vehicles pass smart cameras."
+    },
+    "violations": {
+      "title": "No violations",
+      "description": "No traffic violations have been recorded. This is good news!"
+    },
+    "vehicles": {
+      "title": "No vehicles found",
+      "description": "No vehicles match your search criteria. Try adjusting your filters."
+    },
+    "search": {
+      "title": "No results",
+      "description": "No results found for your search. Try different keywords or check the spelling."
+    },
+    "map": {
+      "title": "No locations",
+      "description": "No camera locations have been set. Add cameras with locations to see them on the map."
+    },
+    "generic": {
+      "title": "No data available",
+      "description": "There is no data to display at this time."
+    }
+  },
+  "errors": {
+    "generic": {
+      "title": "Something went wrong",
+      "message": "An unexpected error occurred. Please try again."
+    },
+    "network": {
+      "title": "Connection lost",
+      "message": "Unable to connect to the server. Please check your internet connection."
+    },
+    "server": {
+      "title": "Server unavailable",
+      "message": "The server is temporarily unavailable. Please try again later."
+    },
+    "notFound": {
+      "title": "Not found",
+      "message": "The requested resource could not be found."
+    },
+    "permission": {
+      "title": "Access denied",
+      "message": "You don't have permission to access this resource."
+    },
+    "cameraConnection": {
+      "title": "Camera disconnected",
+      "message": "Unable to connect to the camera. Please check the connection.",
+      "messageWithName": "Unable to connect to {{name}}. The camera may be offline or experiencing issues."
+    }
+  },
+  "status": {
+    "connected": "Connected",
+    "connecting": "Connecting...",
+    "disconnected": "Disconnected"
+  },
+  "camera": {
+    "online": "Online",
+    "offline": "Offline",
+    "error": "Connection error",
+    "smart": "Smart camera",
+    "standard": "Standard camera",
+    "camera": "Camera"
+  },
+  "violation": {
+    "pending": "Pending",
+    "confirmed": "Confirmed",
+    "dismissed": "Dismissed",
+    "types": {
+      "speed_limit": "Speed limit violation",
+      "red_light": "Red light violation",
+      "wrong_lane": "Lane violation",
+      "no_seatbelt": "No seatbelt",
+      "phone_usage": "Phone usage",
+      "parking": "Parking violation",
+      "other": "Other"
+    }
+  },
+  "violations": {
+    "sortBy": "Sort by",
+    "date": "Date",
+    "type": "Type",
+    "status": "Status",
+    "filters": "Filters",
+    "clearFilters": "Clear filters",
+    "dateFrom": "From date",
+    "dateTo": "To date",
+    "allTypes": "All types",
+    "allStatuses": "All statuses",
+    "plateSearch": "Plate number",
+    "plateSearchPlaceholder": "e.g. 123ABC",
+    "noViolations": "No violations found",
+    "noViolationsHint": "Try adjusting your filters",
+    "showing": "Showing",
+    "of": "of",
+    "viewDetail": "View",
+    "evidence": "Evidence",
+    "videoClip": "Video clip",
+    "updateStatus": "Update status",
+    "statusHistory": "Status history",
+    "cameraInfo": "Camera",
+    "fineAmount": "Fine amount",
+    "backToList": "Back to list",
+    "description": "Description"
+  },
+  "plate": {
+    "noDetections": "No plate detections yet",
+    "lane": "Lane",
+    "recentDetections": "Recent Detections",
+    "lastDetected": "Last detected",
+    "confidence": "Confidence"
+  },
+  "map": {
+    "viewStream": "View Stream",
+    "editMode": "Edit Mode",
+    "exitEdit": "Exit Edit",
+    "addCamera": "Add Camera",
+    "clickToAdd": "Click on map to add camera",
+    "dragToMove": "Drag marker to move camera",
+    "routeStart": "Start",
+    "routeEnd": "End",
+    "lane": "Lane",
+    "timestamp": "Time",
+    "noCameras": "No cameras on map",
+    "addFirstCamera": "Add your first camera",
+    "instructions": "Instructions",
+    "editModeActive": "Edit mode active"
+  },
+  "vehicle": {
+    "details": "Vehicle Details",
+    "brand": "Brand",
+    "model": "Model",
+    "color": "Color",
+    "year": "Year",
+    "owner": "Owner Information",
+    "ownerName": "Full Name",
+    "iin": "IIN",
+    "phone": "Phone",
+    "address": "Address",
+    "detectionHistory": "Detection History",
+    "showRoute": "Show Route",
+    "routePanel": "Route Information",
+    "from": "From",
+    "to": "To",
+    "passedCameras": "Passed Cameras",
+    "totalDistance": "Total Distance",
+    "duration": "Duration",
+    "showOnMap": "Show on Map"
+  },
+  "search": {
+    "placeholder": "Search by plate number...",
+    "noResults": "No results found",
+    "recentSearches": "Recent Searches",
+    "suggestions": "Suggestions"
+  },
+  "admin": {
+    "subtitle": "System management and monitoring dashboard",
+    "systemOnline": "System Online",
+    "quickAccess": "Quick Access",
+    "recentActivity": "Recent Activity",
+    "systemStatus": "System Status",
+    "systemStats": "System Statistics",
+    "stats": {
+      "totalCameras": "Total Cameras",
+      "smartCameras": "Smart Cameras",
+      "todayDetections": "Today's Detections",
+      "pendingViolations": "Pending Violations",
+      "online": "online",
+      "withPlateRecognition": "with plate recognition",
+      "plateRecognitions": "plate recognitions",
+      "total": "total"
+    },
+    "links": {
+      "cameraManagement": "Camera Management",
+      "cameraManagementDesc": "Add, edit, and delete cameras",
+      "mapView": "Map View",
+      "mapViewDesc": "View camera locations on map",
+      "violations": "Violations",
+      "violationsDesc": "Manage traffic violations",
+      "smartCameras": "Smart Cameras",
+      "smartCamerasDesc": "Monitor plate recognition cameras"
+    },
+    "activity": {
+      "plateDetected": "Plate Detected",
+      "newViolation": "New Violation",
+      "cameraOnline": "Camera Online",
+      "systemUpdate": "System Update",
+      "configSaved": "Configuration saved",
+      "connected": "connected",
+      "timeAgo": "{{time}} ago"
+    },
+    "status": {
+      "recognitionRate": "Recognition Rate",
+      "uptime": "System Uptime",
+      "avgLatency": "Avg. Latency",
+      "camerasOnline": "Cameras Online"
+    },
+    "cameras": {
+      "title": "Camera Management",
+      "addNew": "Add Camera",
+      "table": {
+        "name": "Name",
+        "type": "Type",
+        "status": "Status",
+        "location": "Location",
+        "actions": "Actions"
+      },
+      "confirmDelete": "Are you sure you want to delete this camera?",
+      "deleteSuccess": "Camera deleted successfully",
+      "noResults": "No cameras found",
+      "deleteWarning": "This action cannot be undone"
+    },
+    "form": {
+      "basicInfo": "Basic Information",
+      "name": "Camera Name",
+      "namePlaceholder": "e.g. Abay Avenue Camera #1",
+      "rtspUrl": "RTSP URL",
+      "rtspUrlPlaceholder": "rtsp://...",
+      "type": "Camera Type",
+      "selectType": "Select type",
+      "lane": "Lane",
+      "location": "Location",
+      "selectLocation": "Click on map to select location",
+      "latitude": "Latitude",
+      "longitude": "Longitude",
+      "address": "Address (optional)",
+      "addressPlaceholder": "e.g. Abay Avenue 45",
+      "testConnection": "Test Connection",
+      "testing": "Testing...",
+      "connectionSuccess": "Connection successful",
+      "connectionError": "Connection error",
+      "connectionTestFailed": "Connection test failed",
+      "selectedLocation": "Selected location",
+      "validation": {
+        "nameRequired": "Camera name is required",
+        "rtspRequired": "RTSP URL is required",
+        "typeRequired": "Camera type is required",
+        "locationRequired": "Location is required",
+        "saveError": "Failed to save camera. Please try again.",
+        "rtspFormat": "RTSP URL must start with rtsp://"
+      }
+    }
+  }
+}

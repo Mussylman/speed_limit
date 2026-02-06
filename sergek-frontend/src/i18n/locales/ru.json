@@ -1,0 +1,266 @@
+{
+  "nav": {
+    "dashboard": "Панель управления",
+    "cameras": "Камеры",
+    "smartCameras": "Умные камеры",
+    "map": "Карта",
+    "violations": "Нарушения",
+    "admin": "Администрирование",
+    "collapse": "Свернуть"
+  },
+  "header": {
+    "search": "Поиск..."
+  },
+  "pages": {
+    "dashboard": {
+      "title": "Панель управления",
+      "description": "Обзор системы видеонаблюдения Sergek"
+    },
+    "cameras": {
+      "title": "Камеры",
+      "description": "Просмотр всех 15 камер видеонаблюдения"
+    },
+    "cameraDetail": {
+      "title": "Детали камеры",
+      "description": "Просмотр камеры"
+    },
+    "smartCameras": {
+      "title": "Умные камеры",
+      "description": "5 камер с функцией распознавания номеров"
+    },
+    "map": {
+      "title": "Карта",
+      "description": "Расположение камер на карте Шымкента"
+    },
+    "violations": {
+      "title": "Нарушения",
+      "description": "нарушений найдено"
+    },
+    "violationDetail": {
+      "title": "Детали нарушения",
+      "description": "Просмотр нарушения"
+    },
+    "admin": {
+      "title": "Администрирование",
+      "description": "Управление системой"
+    },
+    "adminCameras": {
+      "title": "Управление камерами",
+      "description": "Добавление, редактирование и удаление камер"
+    },
+    "cameraForm": {
+      "createTitle": "Добавить камеру",
+      "editTitle": "Редактировать камеру",
+      "description": "Форма настройки камеры"
+    },
+    "vehicleDetail": {
+      "title": "Информация о транспорте",
+      "description": "Номерной знак:"
+    }
+  },
+  "common": {
+    "loading": "Загрузка...",
+    "saving": "Сохранение...",
+    "error": "Ошибка",
+    "save": "Сохранить",
+    "cancel": "Отмена",
+    "delete": "Удалить",
+    "edit": "Редактировать",
+    "add": "Добавить",
+    "search": "Поиск",
+    "filter": "Фильтр",
+    "noData": "Нет данных",
+    "retry": "Повторить",
+    "dismiss": "Закрыть",
+    "reconnecting": "Переподключение...",
+    "loadError": "Ошибка загрузки",
+    "language": "Язык"
+  },
+  "camera": {
+    "online": "В сети",
+    "offline": "Не в сети",
+    "error": "Ошибка подключения",
+    "smart": "Умная камера",
+    "standard": "Стандартная камера",
+    "camera": "Камера"
+  },
+  "violation": {
+    "pending": "На рассмотрении",
+    "confirmed": "Подтверждено",
+    "dismissed": "Отклонено",
+    "types": {
+      "speed_limit": "Превышение скорости",
+      "red_light": "Проезд на красный",
+      "wrong_lane": "Нарушение полосы",
+      "no_seatbelt": "Без ремня безопасности",
+      "phone_usage": "Использование телефона",
+      "parking": "Нарушение парковки",
+      "other": "Другое"
+    }
+  },
+  "violations": {
+    "sortBy": "Сортировать по",
+    "date": "Дата",
+    "type": "Тип",
+    "status": "Статус",
+    "filters": "Фильтры",
+    "clearFilters": "Сбросить фильтры",
+    "dateFrom": "С даты",
+    "dateTo": "По дату",
+    "allTypes": "Все типы",
+    "allStatuses": "Все статусы",
+    "plateSearch": "Номер авто",
+    "plateSearchPlaceholder": "напр. 123ABC",
+    "noViolations": "Нарушения не найдены",
+    "noViolationsHint": "Попробуйте изменить фильтры",
+    "showing": "Показано",
+    "of": "из",
+    "viewDetail": "Подробнее",
+    "evidence": "Доказательства",
+    "videoClip": "Видеозапись",
+    "updateStatus": "Изменить статус",
+    "statusHistory": "История статусов",
+    "cameraInfo": "Камера",
+    "fineAmount": "Сумма штрафа",
+    "backToList": "К списку",
+    "description": "Описание"
+  },
+  "plate": {
+    "noDetections": "Пока нет распознанных номеров",
+    "lane": "Полоса",
+    "recentDetections": "Последние распознавания",
+    "lastDetected": "Последнее распознавание",
+    "confidence": "Точность"
+  },
+  "map": {
+    "viewStream": "Смотреть поток",
+    "editMode": "Режим редактирования",
+    "exitEdit": "Выйти из редактирования",
+    "addCamera": "Добавить камеру",
+    "clickToAdd": "Нажмите на карту для добавления камеры",
+    "dragToMove": "Перетащите маркер для перемещения камеры",
+    "routeStart": "Начало",
+    "routeEnd": "Конец",
+    "lane": "Полоса",
+    "timestamp": "Время",
+    "noCameras": "Нет камер на карте",
+    "addFirstCamera": "Добавьте первую камеру",
+    "instructions": "Инструкции",
+    "editModeActive": "Режим редактирования активен"
+  },
+  "vehicle": {
+    "details": "Данные транспорта",
+    "brand": "Марка",
+    "model": "Модель",
+    "color": "Цвет",
+    "year": "Год выпуска",
+    "owner": "Информация о владельце",
+    "ownerName": "ФИО",
+    "iin": "ИИН",
+    "phone": "Телефон",
+    "address": "Адрес",
+    "detectionHistory": "История распознаваний",
+    "showRoute": "Показать маршрут",
+    "routePanel": "Информация о маршруте",
+    "from": "Откуда",
+    "to": "Куда",
+    "passedCameras": "Пройденные камеры",
+    "totalDistance": "Общее расстояние",
+    "duration": "Продолжительность",
+    "showOnMap": "Показать на карте"
+  },
+  "search": {
+    "placeholder": "Поиск по номеру...",
+    "noResults": "Ничего не найдено",
+    "recentSearches": "Недавние поиски",
+    "suggestions": "Предложения"
+  },
+  "admin": {
+    "subtitle": "Панель управления и мониторинга системы",
+    "systemOnline": "Система онлайн",
+    "quickAccess": "Быстрый доступ",
+    "recentActivity": "Последняя активность",
+    "systemStatus": "Состояние системы",
+    "systemStats": "Статистика системы",
+    "stats": {
+      "totalCameras": "Всего камер",
+      "smartCameras": "Умные камеры",
+      "todayDetections": "Распознаваний сегодня",
+      "pendingViolations": "Ожидающие нарушения",
+      "online": "в сети",
+      "withPlateRecognition": "с распознаванием номеров",
+      "plateRecognitions": "распознаваний номеров",
+      "total": "всего"
+    },
+    "links": {
+      "cameraManagement": "Управление камерами",
+      "cameraManagementDesc": "Добавление, редактирование и удаление камер",
+      "mapView": "Карта",
+      "mapViewDesc": "Просмотр расположения камер на карте",
+      "violations": "Нарушения",
+      "violationsDesc": "Управление нарушениями ПДД",
+      "smartCameras": "Умные камеры",
+      "smartCamerasDesc": "Мониторинг камер с распознаванием номеров"
+    },
+    "activity": {
+      "plateDetected": "Номер распознан",
+      "newViolation": "Новое нарушение",
+      "cameraOnline": "Камера в сети",
+      "systemUpdate": "Обновление системы",
+      "configSaved": "Конфигурация сохранена",
+      "connected": "подключена",
+      "timeAgo": "{{time}} назад"
+    },
+    "status": {
+      "recognitionRate": "Точность распознавания",
+      "uptime": "Время работы",
+      "avgLatency": "Ср. задержка",
+      "camerasOnline": "Камер в сети"
+    },
+    "cameras": {
+      "title": "Управление камерами",
+      "addNew": "Добавить камеру",
+      "table": {
+        "name": "Название",
+        "type": "Тип",
+        "status": "Статус",
+        "location": "Расположение",
+        "actions": "Действия"
+      },
+      "confirmDelete": "Вы уверены, что хотите удалить эту камеру?",
+      "deleteSuccess": "Камера успешно удалена",
+      "noResults": "Камеры не найдены",
+      "deleteWarning": "Это действие нельзя отменить"
+    },
+    "form": {
+      "basicInfo": "Основная информация",
+      "name": "Название камеры",
+      "namePlaceholder": "напр. Камера на пр. Абая #1",
+      "rtspUrl": "RTSP URL",
+      "rtspUrlPlaceholder": "rtsp://...",
+      "type": "Тип камеры",
+      "selectType": "Выберите тип",
+      "lane": "Полоса",
+      "location": "Расположение",
+      "selectLocation": "Нажмите на карту для выбора расположения",
+      "latitude": "Широта",
+      "longitude": "Долгота",
+      "address": "Адрес (необязательно)",
+      "addressPlaceholder": "напр. пр. Абая 45",
+      "testConnection": "Проверить соединение",
+      "testing": "Проверка...",
+      "connectionSuccess": "Соединение успешно",
+      "connectionError": "Ошибка соединения",
+      "connectionTestFailed": "Тест соединения не удался",
+      "selectedLocation": "Выбранное местоположение",
+      "validation": {
+        "nameRequired": "Название камеры обязательно",
+        "rtspRequired": "RTSP URL обязателен",
+        "typeRequired": "Тип камеры обязателен",
+        "locationRequired": "Расположение обязательно",
+        "saveError": "Не удалось сохранить камеру. Попробуйте еще раз.",
+        "rtspFormat": "RTSP URL должен начинаться с rtsp://"
+      }
+    }
+  }
+}

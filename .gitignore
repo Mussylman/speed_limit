@@ -1,0 +1,55 @@
+# === Архив и служебные ===
+_archive/
+.claude/
+nul
+
+# === Python ===
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# === Внешние зависимости (устанавливаются отдельно) ===
+nomeroff-net/
+ultralytics/
+
+# === Модели (слишком тяжёлые для git) ===
+models/*.engine
+models/*.onnx
+models/*.pt
+models/*.pb
+
+# === Видео (тяжёлые файлы) ===
+videos/*
+!videos/.gitkeep
+
+# === Записи и результаты ===
+records/
+outputs/
+
+# === Конфиг с кредами ===
+config/config_cam.yaml
+config/homography_config_matrix.npy
+
+# === Node.js (frontend) ===
+sergek-frontend/node_modules/
+sergek-frontend/dist/
+sergek-frontend/dist-ssr/
+sergek-frontend/.env.local
+
+# === IDE / OS ===
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+*.log

@@ -1,0 +1,266 @@
+{
+  "nav": {
+    "dashboard": "Басқару тақтасы",
+    "cameras": "Камералар",
+    "smartCameras": "Ақылды камералар",
+    "map": "Карта",
+    "violations": "Бұзушылықтар",
+    "admin": "Әкімшілік",
+    "collapse": "Жию"
+  },
+  "header": {
+    "search": "Іздеу..."
+  },
+  "pages": {
+    "dashboard": {
+      "title": "Басқару тақтасы",
+      "description": "Sergek бейнебақылау жүйесіне шолу"
+    },
+    "cameras": {
+      "title": "Камералар",
+      "description": "Барлық 15 бейнебақылау камерасын қарау"
+    },
+    "cameraDetail": {
+      "title": "Камера мәліметтері",
+      "description": "Камераны қарау"
+    },
+    "smartCameras": {
+      "title": "Ақылды камералар",
+      "description": "Нөмірді тану функциясы бар 5 камера"
+    },
+    "map": {
+      "title": "Карта",
+      "description": "Шымкент картасындағы камералардың орналасуы"
+    },
+    "violations": {
+      "title": "Бұзушылықтар",
+      "description": "бұзушылық табылды"
+    },
+    "violationDetail": {
+      "title": "Бұзушылық мәліметтері",
+      "description": "Бұзушылықты қарау"
+    },
+    "admin": {
+      "title": "Әкімшілік",
+      "description": "Жүйені басқару"
+    },
+    "adminCameras": {
+      "title": "Камераларды басқару",
+      "description": "Камераларды қосу, өңдеу және жою"
+    },
+    "cameraForm": {
+      "createTitle": "Камера қосу",
+      "editTitle": "Камераны өңдеу",
+      "description": "Камера параметрлері формасы"
+    },
+    "vehicleDetail": {
+      "title": "Көлік туралы ақпарат",
+      "description": "Мемлекеттік нөмір:"
+    }
+  },
+  "common": {
+    "loading": "Жүктелуде...",
+    "saving": "Сақталуда...",
+    "error": "Қате",
+    "save": "Сақтау",
+    "cancel": "Болдырмау",
+    "delete": "Жою",
+    "edit": "Өңдеу",
+    "add": "Қосу",
+    "search": "Іздеу",
+    "filter": "Сүзгі",
+    "noData": "Деректер жоқ",
+    "retry": "Қайталау",
+    "dismiss": "Жабу",
+    "reconnecting": "Қайта қосылу...",
+    "loadError": "Жүктеу қатесі",
+    "language": "Тіл"
+  },
+  "camera": {
+    "online": "Желіде",
+    "offline": "Желіде емес",
+    "error": "Қосылу қатесі",
+    "smart": "Ақылды камера",
+    "standard": "Стандартты камера",
+    "camera": "Камера"
+  },
+  "violation": {
+    "pending": "Қарастырылуда",
+    "confirmed": "Расталды",
+    "dismissed": "Қабылданбады",
+    "types": {
+      "speed_limit": "Жылдамдықты асыру",
+      "red_light": "Қызыл шамда өту",
+      "wrong_lane": "Жолақты бұзу",
+      "no_seatbelt": "Қауіпсіздік белдігінсіз",
+      "phone_usage": "Телефон пайдалану",
+      "parking": "Тұрақ ережесін бұзу",
+      "other": "Басқа"
+    }
+  },
+  "violations": {
+    "sortBy": "Сұрыптау",
+    "date": "Күні",
+    "type": "Түрі",
+    "status": "Күйі",
+    "filters": "Сүзгілер",
+    "clearFilters": "Сүзгілерді тазалау",
+    "dateFrom": "Бастап",
+    "dateTo": "Дейін",
+    "allTypes": "Барлық түрлер",
+    "allStatuses": "Барлық күйлер",
+    "plateSearch": "Нөмір",
+    "plateSearchPlaceholder": "мыс. 123ABC",
+    "noViolations": "Бұзушылықтар табылмады",
+    "noViolationsHint": "Сүзгілерді өзгертіп көріңіз",
+    "showing": "Көрсетілуде",
+    "of": "ішінен",
+    "viewDetail": "Толығырақ",
+    "evidence": "Дәлелдер",
+    "videoClip": "Бейнежазба",
+    "updateStatus": "Күйді өзгерту",
+    "statusHistory": "Күй тарихы",
+    "cameraInfo": "Камера",
+    "fineAmount": "Айыппұл сомасы",
+    "backToList": "Тізімге",
+    "description": "Сипаттама"
+  },
+  "plate": {
+    "noDetections": "Әзірге танылған нөмірлер жоқ",
+    "lane": "Жолақ",
+    "recentDetections": "Соңғы танулар",
+    "lastDetected": "Соңғы тану",
+    "confidence": "Дәлдік"
+  },
+  "map": {
+    "viewStream": "Ағынды қарау",
+    "editMode": "Өңдеу режимі",
+    "exitEdit": "Өңдеуден шығу",
+    "addCamera": "Камера қосу",
+    "clickToAdd": "Камера қосу үшін картаны басыңыз",
+    "dragToMove": "Камераны жылжыту үшін маркерді сүйреңіз",
+    "routeStart": "Басы",
+    "routeEnd": "Соңы",
+    "lane": "Жолақ",
+    "timestamp": "Уақыт",
+    "noCameras": "Картада камералар жоқ",
+    "addFirstCamera": "Бірінші камераны қосыңыз",
+    "instructions": "Нұсқаулар",
+    "editModeActive": "Өңдеу режимі белсенді"
+  },
+  "vehicle": {
+    "details": "Көлік мәліметтері",
+    "brand": "Маркасы",
+    "model": "Моделі",
+    "color": "Түсі",
+    "year": "Шығарылған жылы",
+    "owner": "Иесі туралы ақпарат",
+    "ownerName": "Аты-жөні",
+    "iin": "ЖСН",
+    "phone": "Телефон",
+    "address": "Мекенжай",
+    "detectionHistory": "Тану тарихы",
+    "showRoute": "Маршрутты көрсету",
+    "routePanel": "Маршрут туралы ақпарат",
+    "from": "Қайдан",
+    "to": "Қайда",
+    "passedCameras": "Өткен камералар",
+    "totalDistance": "Жалпы қашықтық",
+    "duration": "Ұзақтығы",
+    "showOnMap": "Картада көрсету"
+  },
+  "search": {
+    "placeholder": "Нөмір бойынша іздеу...",
+    "noResults": "Ештеңе табылмады",
+    "recentSearches": "Соңғы іздеулер",
+    "suggestions": "Ұсыныстар"
+  },
+  "admin": {
+    "subtitle": "Жүйені басқару және бақылау тақтасы",
+    "systemOnline": "Жүйе желіде",
+    "quickAccess": "Жылдам қол жеткізу",
+    "recentActivity": "Соңғы белсенділік",
+    "systemStatus": "Жүйе күйі",
+    "systemStats": "Жүйе статистикасы",
+    "stats": {
+      "totalCameras": "Барлық камералар",
+      "smartCameras": "Ақылды камералар",
+      "todayDetections": "Бүгінгі танулар",
+      "pendingViolations": "Күтудегі бұзушылықтар",
+      "online": "желіде",
+      "withPlateRecognition": "нөмірді тану функциясымен",
+      "plateRecognitions": "нөмір тану",
+      "total": "барлығы"
+    },
+    "links": {
+      "cameraManagement": "Камераларды басқару",
+      "cameraManagementDesc": "Камераларды қосу, өңдеу және жою",
+      "mapView": "Карта",
+      "mapViewDesc": "Камералардың картадағы орналасуын қарау",
+      "violations": "Бұзушылықтар",
+      "violationsDesc": "Жол қозғалысы бұзушылықтарын басқару",
+      "smartCameras": "Ақылды камералар",
+      "smartCamerasDesc": "Нөмірді тану камераларын бақылау"
+    },
+    "activity": {
+      "plateDetected": "Нөмір танылды",
+      "newViolation": "Жаңа бұзушылық",
+      "cameraOnline": "Камера желіде",
+      "systemUpdate": "Жүйе жаңартуы",
+      "configSaved": "Конфигурация сақталды",
+      "connected": "қосылды",
+      "timeAgo": "{{time}} бұрын"
+    },
+    "status": {
+      "recognitionRate": "Тану дәлдігі",
+      "uptime": "Жұмыс уақыты",
+      "avgLatency": "Орт. кідіріс",
+      "camerasOnline": "Желідегі камералар"
+    },
+    "cameras": {
+      "title": "Камераларды басқару",
+      "addNew": "Камера қосу",
+      "table": {
+        "name": "Атауы",
+        "type": "Түрі",
+        "status": "Күйі",
+        "location": "Орналасуы",
+        "actions": "Әрекеттер"
+      },
+      "confirmDelete": "Бұл камераны жойғыңыз келетініне сенімдісіз бе?",
+      "deleteSuccess": "Камера сәтті жойылды",
+      "noResults": "Камералар табылмады",
+      "deleteWarning": "Бұл әрекетті қайтару мүмкін емес"
+    },
+    "form": {
+      "basicInfo": "Негізгі ақпарат",
+      "name": "Камера атауы",
+      "namePlaceholder": "мыс. Абай даңғылындағы камера #1",
+      "rtspUrl": "RTSP URL",
+      "rtspUrlPlaceholder": "rtsp://...",
+      "type": "Камера түрі",
+      "selectType": "Түрін таңдаңыз",
+      "lane": "Жолақ",
+      "location": "Орналасуы",
+      "selectLocation": "Орналасуды таңдау үшін картаны басыңыз",
+      "latitude": "Ендік",
+      "longitude": "Бойлық",
+      "address": "Мекенжай (міндетті емес)",
+      "addressPlaceholder": "мыс. Абай даңғылы 45",
+      "testConnection": "Байланысты тексеру",
+      "testing": "Тексеру...",
+      "connectionSuccess": "Байланыс сәтті",
+      "connectionError": "Байланыс қатесі",
+      "connectionTestFailed": "Байланыс тесті сәтсіз",
+      "selectedLocation": "Таңдалған орын",
+      "validation": {
+        "nameRequired": "Камера атауы міндетті",
+        "rtspRequired": "RTSP URL міндетті",
+        "typeRequired": "Камера түрі міндетті",
+        "locationRequired": "Орналасуы міндетті",
+        "saveError": "Камераны сақтау мүмкін болмады. Қайта көріңіз.",
+        "rtspFormat": "RTSP URL rtsp:// арқылы басталуы керек"
+      }
+    }
+  }
+}

@@ -1,0 +1,17 @@
+# === Базовые зависимости ===
+numpy>=1.24.0
+opencv-python>=4.8.0
+PyYAML>=6.0
+pillow>=9.0.0
+
+# === YOLO для детекции и трекинга ===
+ultralytics>=8.0.0
+torch>=2.0.0
+torchvision>=0.15.0
+
+# === OCR номеров ===
+fast-plate-ocr>=1.0.0
+
+# === ONNX ===
+onnx>=1.12.0
+onnxruntime-gpu>=1.15.0
