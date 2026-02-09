@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 
 from .schemas import (
-    CameraInfo, CameraStartRequest, CameraStatus,
+    CameraInfo, CameraLocation, CameraStartRequest, CameraStatus,
     ViolationList, VehicleList, HealthResponse,
 )
 from .websocket import ws_manager
@@ -101,18 +101,53 @@ if OUTPUTS_DIR.exists():
 async def get_cameras():
     """Список камер"""
     cfg = load_cameras_config()
+    cred = cfg.get("camera_credentials", {})
     cameras = cfg.get("cameras", [])
+
+    # Координаты камер в Шымкенте (примерные позиции вдоль основных дорог)
+    default_locations = {
+        "Camera_100": {"lat": 42.3200, "lng": 69.5950, "address": "ул. Тауке хана"},
+        "Camera_101": {"lat": 42.3250, "lng": 69.5850, "address": "пр. Республики"},
+        "Camera_102": {"lat": 42.3300, "lng": 69.5750, "address": "ул. Байтурсынова"},
+        "Camera_103": {"lat": 42.3350, "lng": 69.5900, "address": "ул. Кунаева"},
+        "Camera_104": {"lat": 42.3400, "lng": 69.5800, "address": "пр. Тауелсиздик"},
+        "Camera_105": {"lat": 42.3450, "lng": 69.5700, "address": "ул. Жибек жолы"},
+        "Camera_106": {"lat": 42.3380, "lng": 69.6000, "address": "ул. Туркестанская"},
+        "Camera_107": {"lat": 42.3280, "lng": 69.6050, "address": "ул. Иляева"},
+        "Camera_108": {"lat": 42.3150, "lng": 69.5850, "address": "ул. Мадели кожа"},
+        "Camera_109": {"lat": 42.3500, "lng": 69.5950, "address": "ул. Казыбек би"},
+        "Camera_110": {"lat": 42.3220, "lng": 69.6100, "address": "пр. Кунаева"},
+    }
 
     result = []
     for cam in cameras:
         cam_id = cam.get("name", "unknown")
+        cam_ip = cam.get("ip", "")
         status = mjpeg_streamer.get_status(cam_id)
+        is_running = status and status.get("running", False)
+
+        # Build RTSP URL
+        rtsp_url = None
+        if cred and cam_ip:
+            rtsp_url = make_rtsp_url(cred, cam)
+
+        # Location
+        loc_data = default_locations.get(cam_id, {"lat": 42.3417, "lng": 69.5901})
+        location = CameraLocation(
+            lat=loc_data.get("lat", 42.3417),
+            lng=loc_data.get("lng", 69.5901),
+            address=loc_data.get("address"),
+        )
 
         result.append(CameraInfo(
             id=cam_id,
             name=cam.get("name", cam_id),
-            ip=cam.get("ip"),
-            status="online" if status and status["running"] else "offline",
+            ip=cam_ip,
+            rtsp_url=rtsp_url,
+            hls_url=f"/api/stream/{cam_id}/mjpeg" if is_running else None,
+            location=location,
+            type="smart",
+            status="online" if is_running else "offline",
             backend=status["backend"] if status else None,
             fps=status["fps"] if status else 0,
         ))
@@ -164,6 +199,62 @@ async def stop_camera(camera_id: str):
         return {"status": "stopped", "camera_id": camera_id}
 
     raise HTTPException(404, f"Camera {camera_id} not running")
+
+
+# ============================================================
+# Demo — тестовое видео
+# ============================================================
+
+@app.post("/api/demo/start")
+async def start_demo():
+    """Запуск демо-режима с тестовым видео + pipeline (YOLO + скорость + OCR)"""
+    from .pipeline_processor import get_or_create_pipeline
+
+    video_dir = BASE_DIR / "videos"
+    video_files = list(video_dir.glob("*.avi")) + list(video_dir.glob("*.mp4"))
+
+    if not video_files:
+        raise HTTPException(404, "No test videos found in videos/")
+
+    video_path = str(video_files[0])
+
+    cfg = load_config()
+    cfg_cam = load_cameras_config()
+    cameras = cfg_cam.get("cameras", [])
+
+    # Match camera to video filename (e.g. Camera_108.avi -> Camera_108)
+    video_name = Path(video_path).stem  # "Camera_108"
+    target_cam = next((c for c in cameras if c.get("name") == video_name), None)
+    if not target_cam and cameras:
+        target_cam = cameras[0]
+
+    started = []
+    if target_cam:
+        cam_id = target_cam.get("name", "unknown")
+        # Get actual video FPS for correct speed calculation
+        import cv2 as _cv2
+        _cap = _cv2.VideoCapture(video_path)
+        source_fps = _cap.get(_cv2.CAP_PROP_FPS) if _cap.isOpened() else 0
+        _cap.release()
+        pipeline = get_or_create_pipeline(cfg, cfg_cam, cam_id, source_fps=source_fps)
+        success = mjpeg_streamer.start(cam_id, video_path, frame_processor=pipeline.process_frame)
+        if success:
+            started.append(cam_id)
+            await ws_manager.broadcast("system", "camera_started", {"camera_id": cam_id})
+
+    return {"status": "demo_started", "cameras": started, "video": video_path}
+
+
+@app.post("/api/demo/stop")
+async def stop_demo():
+    """Остановка демо"""
+    from .pipeline_processor import stop_pipeline
+
+    streams = mjpeg_streamer.list_streams()
+    for cam_id in streams:
+        mjpeg_streamer.stop(cam_id)
+        stop_pipeline(cam_id)
+    return {"status": "demo_stopped", "cameras": streams}
 
 
 # ============================================================

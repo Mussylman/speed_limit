@@ -56,8 +56,8 @@ export function CameraCard({
   const status = statusConfig[effectiveStatus]
   const StatusIcon = status.icon
 
-  const shouldShowStream =
-    enableStream && camera.status === 'online' && camera.hlsUrl && !streamError
+  const mjpegUrl = `/api/stream/${camera.id}/mjpeg`
+  const shouldShowMjpeg = camera.status === 'online' && !streamError
 
   return (
     <div
@@ -77,12 +77,12 @@ export function CameraCard({
         {/* Gradient overlay for depth */}
         <div className="absolute inset-0 bg-gradient-to-t from-neutral-900/80 via-transparent to-neutral-900/20 z-10 pointer-events-none" />
 
-        {/* Video stream when enabled and online */}
-        {shouldShowStream ? (
-          <VideoPlayer
-            hlsUrl={camera.hlsUrl}
-            autoPlay={true}
-            muted={true}
+        {/* MJPEG stream when online */}
+        {shouldShowMjpeg ? (
+          <img
+            src={mjpegUrl}
+            alt={camera.name}
+            className="absolute inset-0 w-full h-full object-cover"
             onError={() => setStreamError(true)}
           />
         ) : (
@@ -110,29 +110,6 @@ export function CameraCard({
                 </div>
               </div>
             )}
-
-            {/* Online camera - video placeholder (when stream not enabled) */}
-            {camera.status === 'online' && (
-              <div className="absolute inset-0 bg-neutral-800">
-                {/* Simulated video feed placeholder */}
-                <div className="absolute inset-0 flex items-center justify-center">
-                  <div className="relative">
-                    <Video className="w-16 h-16 text-neutral-600" />
-                    <div className="absolute inset-0 flex items-center justify-center">
-                      <div className="w-3 h-3 bg-error-500 rounded-full animate-pulse" />
-                    </div>
-                  </div>
-                </div>
-                {/* Scan line effect */}
-                <div
-                  className="absolute inset-0 pointer-events-none opacity-30"
-                  style={{
-                    background:
-                      'repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.1) 2px, rgba(0,0,0,0.1) 4px)',
-                  }}
-                />
-              </div>
-            )}
           </>
         )}
 
@@ -157,14 +134,24 @@ export function CameraCard({
           </div>
         </div>
 
-        {/* Smart camera badge */}
-        {camera.type === 'smart' && (
-          <div className="absolute top-3 left-3 z-20">
+        {/* Top left badges: SMART + FPS */}
+        <div className="absolute top-3 left-3 z-20 flex items-center gap-2">
+          {camera.type === 'smart' && (
             <div className="px-2.5 py-1 rounded-full bg-primary-500/90 backdrop-blur-sm">
               <span className="text-xs font-semibold text-white tracking-wide">SMART</span>
             </div>
-          </div>
-        )}
+          )}
+          {camera.status === 'online' && camera.fps != null && camera.fps > 0 && (
+            <div className="px-2.5 py-1 rounded-full bg-neutral-900/70 backdrop-blur-sm border border-neutral-700/50">
+              <span className="text-xs font-mono font-semibold text-emerald-400">{Math.round(camera.fps)} FPS</span>
+            </div>
+          )}
+          {camera.status === 'online' && camera.backend && (
+            <div className="px-2 py-1 rounded-full bg-neutral-900/70 backdrop-blur-sm border border-neutral-700/50">
+              <span className="text-[10px] font-mono text-neutral-300">{camera.backend}</span>
+            </div>
+          )}
+        </div>
 
         {/* Bottom overlay with camera info */}
         {showOverlay && (

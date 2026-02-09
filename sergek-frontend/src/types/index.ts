@@ -29,6 +29,8 @@ export interface Camera {
   type: CameraType
   status: CameraStatus
   lane?: number
+  fps?: number
+  backend?: string
 }
 
 // ============================================

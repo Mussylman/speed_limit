@@ -49,7 +49,7 @@ class VideoSource:
         source_type: Optional[SourceType] = None,
         prefer_hw: bool = True,
         prefetch: bool = True,
-        prefetch_size: int = 3,
+        prefetch_size: int = 8,
         reconnect_delay: float = 3.0,
         max_reconnects: int = 10,
     ):
@@ -75,6 +75,12 @@ class VideoSource:
         self._prefetch_thread: Optional[Thread] = None
         self._stop_event = Event()
         self._reconnect_count = 0
+
+        # Decode stats
+        self._decode_fps = 0.0
+        self._decode_count = 0
+        self._decode_start = time.time()
+        self._frames_dropped = 0
 
         # Info
         self.info: Optional[SourceInfo] = None
@@ -125,8 +131,8 @@ class VideoSource:
             backend=decoder_info.backend.value,
         )
 
-        # Prefetch только для RTSP
-        if self.prefetch_enabled and self.source_type == SourceType.RTSP:
+        # Prefetch для RTSP и видеофайлов
+        if self.prefetch_enabled and self.source_type in (SourceType.RTSP, SourceType.VIDEO):
             self._start_prefetch()
 
     def _open_folder(self):
@@ -193,10 +199,14 @@ class VideoSource:
         self._prefetch_thread.start()
 
     def _prefetch_loop(self):
-        """Цикл prefetch с reconnect"""
+        """Цикл prefetch с reconnect (RTSP) или EOF (видеофайл)"""
         while not self._stop_event.is_set():
             if self._decoder is None or not self._decoder.is_opened():
-                # Reconnect
+                if self.source_type == SourceType.VIDEO:
+                    self._prefetch_queue.put((False, None, 0.0))
+                    break
+
+                # RTSP: Reconnect
                 if self._reconnect_count >= self.max_reconnects:
                     print(f"[VideoSource] Max reconnects reached")
                     break
@@ -215,40 +225,87 @@ class VideoSource:
                 print(f"[VideoSource] Reconnected via {decoder_info.backend.value}")
 
             # Read frame
-            if not self._prefetch_queue.full():
-                ok, frame = self._decoder.read()
-                if ok and frame is not None:
-                    self._prefetch_queue.put((True, frame))
-                else:
-                    # Connection lost
-                    self._decoder.close()
+            ok, frame = self._decoder.read()
+            capture_ts = time.time()
+
+            if ok and frame is not None:
+                # Decode FPS counter
+                self._decode_count += 1
+                now = time.time()
+                if now - self._decode_start >= 1.0:
+                    self._decode_fps = self._decode_count / (now - self._decode_start)
+                    self._decode_count = 0
+                    self._decode_start = now
+
+                if self._prefetch_queue.full():
+                    if self.source_type == SourceType.RTSP:
+                        # RTSP: drop oldest to keep live current
+                        try:
+                            self._prefetch_queue.get_nowait()
+                            self._frames_dropped += 1
+                        except Empty:
+                            pass
+                    else:
+                        # Video file: wait for consumer (don't skip frames)
+                        while self._prefetch_queue.full() and not self._stop_event.is_set():
+                            time.sleep(0.001)
+
+                self._prefetch_queue.put((True, frame, capture_ts))
+
+            elif self.source_type == SourceType.VIDEO:
+                self._prefetch_queue.put((False, None, 0.0))
+                break
             else:
-                time.sleep(0.001)
+                # RTSP connection lost
+                self._decoder.close()
 
     # =========================================================
     # Public API
     # =========================================================
 
-    def read(self) -> Tuple[bool, Optional[np.ndarray]]:
-        """Читает кадр"""
-        # Prefetch mode (RTSP)
+    def read(self) -> Tuple[bool, Optional[np.ndarray], float]:
+        """Читает кадр. Возвращает (ok, frame, capture_timestamp)"""
+        # Prefetch mode
         if self._prefetch_thread is not None:
             try:
                 return self._prefetch_queue.get(timeout=1.0)
             except Empty:
-                return False, None
+                return False, None, 0.0
 
-        # Video file
+        # Video file (no prefetch)
         if self._decoder is not None:
-            return self._decoder.read()
+            ts = time.time()
+            ok, frame = self._decoder.read()
+            return ok, frame, ts
 
         # Images
         if self._image_index < len(self._image_files):
+            ts = time.time()
             frame = cv2.imread(self._image_files[self._image_index])
             self._image_index += 1
-            return True, frame
+            return True, frame, ts
 
-        return False, None
+        return False, None, 0.0
+
+    @property
+    def queue_size(self) -> int:
+        """Текущий размер очереди prefetch"""
+        return self._prefetch_queue.qsize()
+
+    @property
+    def queue_capacity(self) -> int:
+        """Макс. размер очереди"""
+        return self.prefetch_size
+
+    @property
+    def decode_fps(self) -> float:
+        """FPS декодирования (в prefetch потоке)"""
+        return self._decode_fps
+
+    @property
+    def frames_dropped(self) -> int:
+        """Кол-во дропнутых кадров из очереди"""
+        return self._frames_dropped
 
     def release(self):
         """Закрывает источник"""

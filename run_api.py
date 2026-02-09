@@ -18,14 +18,14 @@ def main():
     args = parser.parse_args()
 
     print(f"""
-╔══════════════════════════════════════════════════════════╗
-║           Speed Limit API Server                         ║
-╠══════════════════════════════════════════════════════════╣
-║  REST API:    http://{args.host}:{args.port}/api
-║  WebSocket:   ws://{args.host}:{args.port}/ws
-║  Swagger UI:  http://{args.host}:{args.port}/docs
-║  ReDoc:       http://{args.host}:{args.port}/redoc
-╚══════════════════════════════════════════════════════════╝
+==========================================================
+           Speed Limit API Server
+==========================================================
+  REST API:    http://{args.host}:{args.port}/api
+  WebSocket:   ws://{args.host}:{args.port}/ws
+  Swagger UI:  http://{args.host}:{args.port}/docs
+  ReDoc:       http://{args.host}:{args.port}/redoc
+==========================================================
     """)
 
     import uvicorn

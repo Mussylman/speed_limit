@@ -134,20 +134,38 @@ class MJPEGStreamer:
             session.stats.backend = info.backend.value
             reconnects = 0
 
+            # Detect if source is a file and get its FPS for rate limiting
+            is_file = not session.url.startswith("rtsp://")
+            source_fps = info.cap.get(cv2.CAP_PROP_FPS) if is_file and info.cap else 25
+            if source_fps <= 0 or source_fps > 60:
+                source_fps = 25
+            frame_delay = 1.0 / source_fps if is_file else 0
+
             fps_counter = 0
             fps_start = time.time()
 
             while session.running and not session.stop_event.is_set():
+                frame_start = time.time()
                 ok, frame = session.decoder.read()
+                capture_ts = time.time()
 
                 if not ok or frame is None:
                     break
 
                 session.stats.frames_read += 1
 
-                # Process frame
+                # Rate limit for video files
+                if frame_delay > 0:
+                    elapsed = time.time() - frame_start
+                    sleep_time = frame_delay - elapsed
+                    if sleep_time > 0:
+                        time.sleep(sleep_time)
+
+                # Process frame (pass capture timestamp)
                 if session.frame_processor:
                     try:
+                        frame = session.frame_processor(frame, capture_ts=capture_ts)
+                    except TypeError:
                         frame = session.frame_processor(frame)
                     except Exception:
                         pass

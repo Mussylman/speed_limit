@@ -29,6 +29,8 @@ interface CameraResponse {
   type: 'smart' | 'standard'
   status: 'online' | 'offline' | 'error'
   lane?: number
+  fps?: number
+  backend?: string
 }
 
 // Transform API response to Camera type
@@ -42,6 +44,8 @@ function transformCamera(data: CameraResponse): Camera {
     type: data.type,
     status: data.status,
     lane: data.lane,
+    fps: data.fps,
+    backend: data.backend,
   }
 }
 

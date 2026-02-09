@@ -21,7 +21,7 @@ homography:
   max_speed_kmh: 200
   min_speed_kmh: 5
   show_bird_eye: true
-  speed_correction: 0.63
+  speed_correction: 0.50
 
 # =============================================================
 # === OCR ФИЛЬТРЫ (чтобы не гонять OCR на каждом кадре) ===
