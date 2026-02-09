@@ -1,16 +1,24 @@
 # file_logger.py
-# Структурированное логирование в JSONL файлы
+# Debug/performance event stream to JSONL files.
+#
+# Responsibilities (debug & perf trace):
+#   - YOLO detections:   logs/detections.jsonl
+#   - OCR attempts:      logs/ocr_attempts.jsonl
+#   - System performance: logs/performance.jsonl
+#
+# NOT responsible for:
+#   - Speed measurements → SpeedTracker (speed_tracker.py)
+#   - Aggregate stats    → MetricsLogger  (metrics_logger.py)
 
 import os
 import json
 import time
-from typing import Dict, List, Any, Optional
-from dataclasses import dataclass, asdict
+from typing import Dict, List
 from threading import Lock
 
 
 class JSONLWriter:
-    """Потокобезопасная запись в JSONL файл."""
+    """Thread-safe JSONL file writer."""
 
     def __init__(self, path: str):
         self.path = path
@@ -28,13 +36,12 @@ class JSONLWriter:
 
 class FileLogger:
     """
-    Структурированное логирование в файлы.
+    Debug/performance event stream.
 
-    Файлы:
-    - detections.jsonl: все детекции YOLO
-    - ocr_attempts.jsonl: все попытки OCR
-    - speeds.jsonl: измерения скорости
-    - performance.jsonl: FPS, время обработки
+    Files:
+    - detections.jsonl:   YOLO detections per frame
+    - ocr_attempts.jsonl: every OCR attempt with scores and reasons
+    - performance.jsonl:  FPS, processing times, queue sizes
     """
 
     def __init__(self, output_dir: str):
@@ -42,15 +49,14 @@ class FileLogger:
 
         self.detections = JSONLWriter(os.path.join(logs_dir, "detections.jsonl"))
         self.ocr_attempts = JSONLWriter(os.path.join(logs_dir, "ocr_attempts.jsonl"))
-        self.speeds = JSONLWriter(os.path.join(logs_dir, "speeds.jsonl"))
         self.performance = JSONLWriter(os.path.join(logs_dir, "performance.jsonl"))
 
         self._start_time = time.time()
         self._frame_count = 0
         self._last_perf_log = 0
-        self._perf_interval = 1.0  # логировать performance каждую секунду
+        self._perf_interval = 1.0
 
-        print(f"📁 Logs: {logs_dir}/")
+        print(f"Logs: {logs_dir}/")
 
     def log_detections(
         self,
@@ -58,11 +64,7 @@ class FileLogger:
         detections: List[Dict],
         yolo_time_ms: float,
     ):
-        """
-        Логирует детекции YOLO.
-
-        detections: [{obj_id, box, conf, cx, cy}, ...]
-        """
+        """Log YOLO detections for a frame."""
         self.detections.write({
             "ts": time.time(),
             "frame": frame_idx,
@@ -84,22 +86,19 @@ class FileLogger:
         track_id: int,
         status: str,  # "passed", "failed", "skipped"
         plate_text: str = "",
-        # Три отдельных score
-        car_score: float = 0.0,      # YOLO detection conf
-        plate_score: float = 0.0,    # Качество crop номера
-        ocr_score: float = 0.0,      # Качество OCR текста
-        # Raw данные
+        car_score: float = 0.0,
+        plate_score: float = 0.0,
+        ocr_score: float = 0.0,
         blur: float = 0.0,
         brightness: float = 0.0,
         plate_width: int = 0,
         plate_height: int = 0,
         car_width: int = 0,
         car_height: int = 0,
-        # Причина skip/fail
         reason: str = "",
         processing_ms: float = 0.0,
     ):
-        """Логирует попытку OCR."""
+        """Log an OCR attempt with scores and skip/fail reason."""
         self.ocr_attempts.write({
             "ts": time.time(),
             "frame": frame_idx,
@@ -122,22 +121,6 @@ class FileLogger:
             "proc_ms": round(processing_ms, 1),
         })
 
-    def log_speed(
-        self,
-        frame_idx: int,
-        track_id: int,
-        speed_kmh: float,
-        plate_text: str = "",
-    ):
-        """Логирует измерение скорости."""
-        self.speeds.write({
-            "ts": time.time(),
-            "frame": frame_idx,
-            "track_id": track_id,
-            "speed": round(speed_kmh, 1),
-            "plate": plate_text,
-        })
-
     def log_performance(
         self,
         frame_idx: int,
@@ -147,7 +130,7 @@ class FileLogger:
         yolo_queue: int = 0,
         cars_count: int = 0,
     ):
-        """Логирует метрики производительности."""
+        """Log system performance metrics (throttled to once per second)."""
         now = time.time()
         if now - self._last_perf_log < self._perf_interval:
             return

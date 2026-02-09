@@ -1,34 +1,44 @@
-# speed_logger.py
-# Логирование скорости с отметкой нарушений
+# speed_tracker.py
+# Domain-level speed tracking: per-vehicle max speed, violation detection,
+# raw measurement stream, final reports.
+#
+# Responsibilities (domain events):
+#   - In-memory state: best (max) speed per track_id — used by UI at runtime
+#   - Raw stream:      every measurement → speeds/measurements.jsonl
+#   - Final reports:   speeds/all_speeds.json, speeds/violations.json
+#
+# NOT responsible for:
+#   - Debug/perf trace (detections, OCR attempts, performance) → FileLogger
+#   - Aggregate stats (FPS, sliding windows, periodic reports)  → MetricsLogger
 
 import os
 import json
+import time
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict
 from dataclasses import dataclass, asdict
+from threading import Lock
+
 import numpy as np
 
 
 @dataclass
 class SpeedEvent:
-    """Данные о скорости транспорта"""
+    """Speed data for a vehicle"""
     track_id: int = 0
     speed_kmh: float = 0.0
     timestamp: str = ""
     frame_idx: int = 0
     camera_id: str = ""
 
-    # Лимит и нарушение
     speed_limit: int = 70
     is_violation: bool = False
 
-    # Номер (если распознан)
     plate_text: str = ""
     plate_conf: float = 0.0
 
     def to_dict(self) -> dict:
         d = asdict(self)
-        # Конвертируем numpy типы
         for key, value in d.items():
             if isinstance(value, (np.bool_, bool)):
                 d[key] = bool(value)
@@ -39,15 +49,18 @@ class SpeedEvent:
         return d
 
 
-class SpeedLogger:
+class SpeedTracker:
     """
-    Логирование скорости транспорта.
+    Domain-level speed tracker.
 
-    Структура:
-    output_dir/
-    └── speeds/
-        ├── all_speeds.json     # все измерения
-        └── violations.json     # только нарушители (> speed_limit)
+    Tracks max speed per vehicle, detects violations, streams raw
+    measurements to JSONL, and writes final summary reports.
+
+    Output:
+        output_dir/speeds/
+            measurements.jsonl   — every speed measurement (streaming)
+            all_speeds.json      — final: all vehicles with max speed
+            violations.json      — final: only violators
     """
 
     def __init__(
@@ -60,14 +73,13 @@ class SpeedLogger:
         self.camera_id = camera_id
         self.speed_limit = speed_limit
 
-        # Папка для скоростей
         self.speeds_dir = os.path.join(output_dir, "speeds")
         os.makedirs(self.speeds_dir, exist_ok=True)
 
-        # Лучшая скорость для каждого track_id (максимальная)
+        # Best (max) speed per track_id — used at runtime by UI
         self.speeds: Dict[int, SpeedEvent] = {}
 
-        # Статистика
+        # Stats
         self.stats = {
             "total_measurements": 0,
             "unique_vehicles": 0,
@@ -76,7 +88,11 @@ class SpeedLogger:
             "avg_speed": 0.0,
         }
 
-        print(f"🚗 Лимит скорости: {speed_limit} км/ч")
+        # Raw measurement stream (JSONL)
+        self._jsonl_path = os.path.join(self.speeds_dir, "measurements.jsonl")
+        self._jsonl_lock = Lock()
+
+        print(f"Speed limit: {speed_limit} km/h")
 
     def update(
         self,
@@ -86,15 +102,18 @@ class SpeedLogger:
         plate_text: str = "",
         plate_conf: float = 0.0,
     ):
-        """Обновляет скорость для track_id (сохраняет максимальную)"""
+        """Update speed for track_id (keeps max). Also streams raw measurement."""
         if speed_kmh <= 0:
             return
 
         self.stats["total_measurements"] += 1
 
+        # Stream raw measurement to JSONL
+        self._write_measurement(frame_idx, track_id, speed_kmh, plate_text)
+
         current = self.speeds.get(track_id)
 
-        # Сохраняем максимальную скорость
+        # Keep max speed
         if current is None or speed_kmh > current.speed_kmh:
             event = SpeedEvent(
                 track_id=track_id,
@@ -109,18 +128,31 @@ class SpeedLogger:
             )
             self.speeds[track_id] = event
 
-            # Логируем нарушения
             if event.is_violation and (current is None or not current.is_violation):
-                print(f"🚨 НАРУШЕНИЕ! ID:{track_id} → {speed_kmh:.0f} км/ч (лимит {self.speed_limit})")
+                print(f"VIOLATION! ID:{track_id} -> {speed_kmh:.0f} km/h (limit {self.speed_limit})")
 
     def update_plate(self, track_id: int, plate_text: str, plate_conf: float):
-        """Обновляет номер для существующей записи скорости"""
+        """Update plate for an existing speed record"""
         if track_id in self.speeds:
             self.speeds[track_id].plate_text = plate_text
             self.speeds[track_id].plate_conf = round(plate_conf, 2)
 
+    def _write_measurement(self, frame_idx: int, track_id: int,
+                           speed_kmh: float, plate_text: str):
+        """Stream a single measurement to JSONL."""
+        record = {
+            "ts": time.time(),
+            "frame": frame_idx,
+            "track_id": track_id,
+            "speed": round(speed_kmh, 1),
+            "plate": plate_text,
+        }
+        with self._jsonl_lock:
+            with open(self._jsonl_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
     def finalize(self):
-        """Сохраняет все результаты на диск"""
+        """Save final reports to disk."""
         all_speeds = []
         violations = []
 
@@ -129,18 +161,17 @@ class SpeedLogger:
         for event in speeds_list:
             data = event.to_dict()
             all_speeds.append(data)
-
             if event.is_violation:
                 violations.append(data)
 
-        # Статистика
         if speeds_list:
             self.stats["unique_vehicles"] = len(speeds_list)
             self.stats["violations"] = len(violations)
             self.stats["max_speed"] = max(e.speed_kmh for e in speeds_list)
-            self.stats["avg_speed"] = round(sum(e.speed_kmh for e in speeds_list) / len(speeds_list), 1)
+            self.stats["avg_speed"] = round(
+                sum(e.speed_kmh for e in speeds_list) / len(speeds_list), 1)
 
-        # Сохраняем все скорости
+        # All speeds
         all_path = os.path.join(self.speeds_dir, "all_speeds.json")
         with open(all_path, "w", encoding="utf-8") as f:
             json.dump({
@@ -150,7 +181,7 @@ class SpeedLogger:
                 "vehicles": all_speeds,
             }, f, ensure_ascii=False, indent=2)
 
-        # Сохраняем нарушителей
+        # Violations only
         viol_path = os.path.join(self.speeds_dir, "violations.json")
         with open(viol_path, "w", encoding="utf-8") as f:
             json.dump({
@@ -160,10 +191,10 @@ class SpeedLogger:
                 "vehicles": violations,
             }, f, ensure_ascii=False, indent=2)
 
-        print(f"\n🚗 Статистика скорости:")
-        print(f"   Всего измерений: {self.stats['total_measurements']}")
-        print(f"   Уникальных ТС: {self.stats['unique_vehicles']}")
-        print(f"   Средняя скорость: {self.stats['avg_speed']} км/ч")
-        print(f"   Макс. скорость: {self.stats['max_speed']} км/ч")
-        print(f"   🚨 Нарушителей (>{self.speed_limit} км/ч): {self.stats['violations']}")
-        print(f"\n📁 Скорости: {self.speeds_dir}")
+        print(f"\nSpeed stats:")
+        print(f"   Total measurements: {self.stats['total_measurements']}")
+        print(f"   Unique vehicles: {self.stats['unique_vehicles']}")
+        print(f"   Average speed: {self.stats['avg_speed']} km/h")
+        print(f"   Max speed: {self.stats['max_speed']} km/h")
+        print(f"   Violations (>{self.speed_limit} km/h): {self.stats['violations']}")
+        print(f"\nSpeeds dir: {self.speeds_dir}")
