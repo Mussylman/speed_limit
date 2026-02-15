@@ -59,12 +59,14 @@ class AsyncYOLO:
         half: bool = True,
         tracker: str = "bytetrack.yaml",
         max_queue_size: int = 3,
+        min_conf: float = 0.5,
     ):
         self.model = model
         self.imgsz = imgsz
         self.classes = classes or [2]  # cars by default
         self.half = half
         self.tracker = tracker
+        self.min_conf = min_conf
 
         # Очередь кадров (size=3 чтобы не терять кадры с хорошими номерами)
         self.input_queue: Queue[YOLOTask] = Queue(maxsize=max_queue_size)
@@ -125,7 +127,7 @@ class AsyncYOLO:
                         obj_id = int(ids[i])
                         conf = float(confs[i])
 
-                        if conf < 0.5:
+                        if conf < self.min_conf:
                             continue
 
                         # Clip to frame bounds
@@ -175,20 +177,26 @@ class AsyncYOLO:
             self.output_queue.put(result)
             self.stats["processed"] += 1
 
-    def submit(self, frame: np.ndarray, frame_idx: int) -> bool:
+    def submit(self, frame: np.ndarray, frame_idx: int, blocking: bool = False) -> bool:
         """
         Отправить кадр на обработку.
+        blocking=True: ждать место в очереди (no_drop режим).
         Returns: True если добавлен, False если очередь полна.
         """
-        if self.input_queue.full():
-            self.stats["dropped"] += 1
-            return False
-
         task = YOLOTask(
             frame=frame.copy(),
             frame_idx=frame_idx,
             submit_time=time.time(),
         )
+
+        if blocking:
+            self.input_queue.put(task)  # blocks until space available
+            self.stats["submitted"] += 1
+            return True
+
+        if self.input_queue.full():
+            self.stats["dropped"] += 1
+            return False
 
         try:
             self.input_queue.put_nowait(task)
@@ -198,9 +206,20 @@ class AsyncYOLO:
             self.stats["dropped"] += 1
             return False
 
-    def get_results(self) -> List[YOLOResult]:
-        """Забрать все готовые результаты (неблокирующий)."""
+    def get_results(self, blocking: bool = False) -> List[YOLOResult]:
+        """Забрать все готовые результаты.
+
+        blocking=True: ждать хотя бы один результат (для sync режима).
+        """
         results = []
+        if blocking:
+            # Ждём первый результат
+            try:
+                result = self.output_queue.get(timeout=5.0)
+                results.append(result)
+            except Empty:
+                return results
+        # Забираем остальные без ожидания
         while True:
             try:
                 result = self.output_queue.get_nowait()

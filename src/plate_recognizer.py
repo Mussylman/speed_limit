@@ -21,6 +21,12 @@ from dataclasses import dataclass, field, asdict
 from nomeroff_net import pipeline
 from nomeroff_net.tools import unzip
 
+from kz_plate import (
+    fix_kz_plate, fix_kz_8chars, kz_score, kz_score_7,
+    merge_texts_charwise, levenshtein_distance,
+    CHAR_TO_DIGIT, CHAR_TO_LETTER, LETTER_CONFUSIONS, OCR_PREFER, KZ_REGIONS,
+)
+
 
 @dataclass
 class PlateEvent:
@@ -269,22 +275,6 @@ class PlateRecognizer:
             return False, f"bright:{brightness:.0f}"
         return True, ""
 
-    @staticmethod
-    def _levenshtein_distance(s1: str, s2: str) -> int:
-        """Расстояние Левенштейна между двумя строками."""
-        if len(s1) < len(s2):
-            return PlateRecognizer._levenshtein_distance(s2, s1)
-        if len(s2) == 0:
-            return len(s1)
-        prev_row = range(len(s2) + 1)
-        for i, c1 in enumerate(s1):
-            curr_row = [i + 1]
-            for j, c2 in enumerate(s2):
-                cost = 0 if c1 == c2 else 1
-                curr_row.append(min(curr_row[j] + 1, prev_row[j + 1] + 1, prev_row[j] + cost))
-            prev_row = curr_row
-        return prev_row[-1]
-
     def _fuzzy_vote(self, track_id: int, text: str) -> Tuple[str, int]:
         """Fuzzy голосование: тексты с расстоянием ≤1 считаются одинаковыми.
 
@@ -293,7 +283,7 @@ class PlateRecognizer:
         votes = self.text_votes[track_id]
         # Найти существующий текст с расстоянием ≤ 1
         for existing_text in votes:
-            if self._levenshtein_distance(text, existing_text) <= 1:
+            if levenshtein_distance(text, existing_text) <= 1:
                 # Голосуем за тот вариант, который длиннее или чаще
                 if votes[existing_text] >= votes.get(text, 0):
                     votes[existing_text] += 1
@@ -395,179 +385,7 @@ class PlateRecognizer:
             "total": round(total, 3),
         }
 
-    # KZ plate: позиции 0-2 = цифры, 3-5 = буквы, 6-7 = цифры (регион)
-    _CHAR_TO_DIGIT = {'O': '0', 'Q': '0', 'D': '0', 'U': '0',
-                      'I': '1', 'L': '1', 'J': '1',
-                      'Z': '2', 'B': '8', 'S': '5', 'G': '6', 'T': '7'}
-    _CHAR_TO_LETTER = {'0': 'O', '1': 'I', '8': 'B', '9': 'B', '5': 'S',
-                       '6': 'G', '7': 'T', '2': 'Z'}
-    # Визуально похожие буквы (OCR часто путает)
-    _LETTER_CONFUSIONS = {
-        'A': ['Z', 'H'],       # A ↔ Z (диагональные линии)
-        'C': ['G', 'O', 'Z'],  # C ↔ Z (на мелком разрешении)
-        'Z': ['A', 'C', '2'],  # Z путают с A, C
-        'N': ['H', 'M'],       # N ↔ H
-        'H': ['N', 'A'],       # H ↔ N, A
-        'T': ['I', 'Y'],       # T ↔ I
-        'E': ['F', 'B'],       # E ↔ F
-    }
-    # OCR error direction: common_misread -> correct_char
-    # OCR tends to produce the LEFT char when the RIGHT is correct
-    # e.g., OCR outputs 'A' when the real char is 'Z'
-    _OCR_PREFER = {
-        ('A', 'Z'): 'Z',   # Z misread as A (diagonal lines)
-        ('C', 'Z'): 'Z',   # Z misread as C (small resolution)
-        ('H', 'N'): 'N',   # N misread as H
-        ('N', 'H'): 'N',   # prefer N over H
-        ('I', 'T'): 'T',   # T misread as I (cross-bar lost)
-    }
-    # Допустимые регионы KZ (01-21 основные)
-    _KZ_REGIONS = {f'{i:02d}' for i in range(1, 22)}
-
-    @staticmethod
-    def _fix_kz_8chars(chars: list) -> list:
-        """Применяет позиционную коррекцию для 8-символьного KZ номера."""
-        # Позиции 0-2: должны быть цифры
-        for i in range(3):
-            if chars[i].isalpha():
-                chars[i] = PlateRecognizer._CHAR_TO_DIGIT.get(chars[i], chars[i])
-        # Позиции 3-5: должны быть буквы
-        for i in range(3, 6):
-            if chars[i].isdigit():
-                chars[i] = PlateRecognizer._CHAR_TO_LETTER.get(chars[i], chars[i])
-        # Позиции 6-7: должны быть цифры (регион)
-        for i in range(6, 8):
-            if chars[i].isalpha():
-                chars[i] = PlateRecognizer._CHAR_TO_DIGIT.get(chars[i], chars[i])
-        return chars
-
-    @staticmethod
-    def _kz_score(text: str) -> int:
-        """Оценка соответствия KZ формату (0-8, больше = лучше)."""
-        if len(text) != 8:
-            return 0
-        score = 0
-        for i in range(3):
-            if text[i].isdigit():
-                score += 1
-        for i in range(3, 6):
-            if text[i].isalpha():
-                score += 1
-        for i in range(6, 8):
-            if text[i].isdigit():
-                score += 1
-        return score
-
-    @staticmethod
-    def _fix_kz_7chars(chars: list) -> list:
-        """Позиционная коррекция для 7-символьного KZ (потеряна 1 буква: XXX YY XX)."""
-        for i in range(3):
-            if chars[i].isalpha():
-                chars[i] = PlateRecognizer._CHAR_TO_DIGIT.get(chars[i], chars[i])
-        for i in range(3, 5):
-            if chars[i].isdigit():
-                chars[i] = PlateRecognizer._CHAR_TO_LETTER.get(chars[i], chars[i])
-        for i in range(5, 7):
-            if chars[i].isalpha():
-                chars[i] = PlateRecognizer._CHAR_TO_DIGIT.get(chars[i], chars[i])
-        return chars
-
-    @staticmethod
-    def _kz_score_7(text: str) -> int:
-        """Оценка соответствия 7-символьного KZ формату (XXX YY XX)."""
-        if len(text) != 7:
-            return 0
-        score = 0
-        for i in range(3):
-            if text[i].isdigit():
-                score += 1
-        for i in range(3, 5):
-            if text[i].isalpha():
-                score += 1
-        for i in range(5, 7):
-            if text[i].isdigit():
-                score += 1
-        return score
-
-    @staticmethod
-    def _fix_kz_plate(text: str) -> str:
-        """Исправляет типичные ошибки OCR для казахстанских номеров.
-
-        Формат KZ: XXX YYY XX (3 цифры + 3 буквы + 2 цифры).
-        1. 8 символов — позиционная коррекция (O↔0, I↔1, B↔8, S↔5)
-        2. 9 символов — пробуем удалить 1 лишний символ
-        3. 7 символов — позиционная коррекция (OCR потерял 1 букву)
-        """
-        if not text or len(text) < 7 or len(text) > 9:
-            return text
-
-        # 8 символов: прямая коррекция
-        if len(text) == 8:
-            chars = PlateRecognizer._fix_kz_8chars(list(text))
-            return ''.join(chars)
-
-        # 7 символов: OCR потерял 1 символ
-        # Пробуем вставить пропущенный символ в каждую позицию, проверяем формат
-        if len(text) == 7:
-            # Сначала коррекция как 7-char (XXX YY XX)
-            fixed7 = PlateRecognizer._fix_kz_7chars(list(text))
-            fixed7_str = ''.join(fixed7)
-
-            # Пробуем вставить букву в позиции 3,4,5 (буквенная часть)
-            # KZ буквы встречающиеся на номерах
-            kz_letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
-            best = None
-            best_score = -1
-            for insert_pos in [3, 4, 5]:
-                for letter in kz_letters:
-                    candidate = text[:insert_pos] + letter + text[insert_pos:]
-                    fixed = PlateRecognizer._fix_kz_8chars(list(candidate))
-                    fixed_str = ''.join(fixed)
-                    score = PlateRecognizer._kz_score(fixed_str)
-                    if fixed_str[6:8] in PlateRecognizer._KZ_REGIONS:
-                        score += 2
-                    if score > best_score:
-                        best_score = score
-                        best = fixed_str
-
-            # Также пробуем вставить цифру в позиции 0,1,2,6,7 (цифровые)
-            for insert_pos in [0, 1, 2, 6, 7]:
-                for digit in '0123456789':
-                    candidate = text[:insert_pos] + digit + text[insert_pos:]
-                    fixed = PlateRecognizer._fix_kz_8chars(list(candidate))
-                    fixed_str = ''.join(fixed)
-                    score = PlateRecognizer._kz_score(fixed_str)
-                    if fixed_str[6:8] in PlateRecognizer._KZ_REGIONS:
-                        score += 2
-                    if score > best_score:
-                        best_score = score
-                        best = fixed_str
-
-            if best and best_score >= 9:
-                return best
-
-            return fixed7_str
-
-        # 9 символов: OCR вставил лишний символ — пробуем все варианты удаления
-        if len(text) == 9:
-            best = None
-            best_score = (-1, -1)
-            for i in range(9):
-                candidate = text[:i] + text[i+1:]
-                native_score = PlateRecognizer._kz_score(candidate)
-                fixed = PlateRecognizer._fix_kz_8chars(list(candidate))
-                fixed_str = ''.join(fixed)
-                fmt_score = PlateRecognizer._kz_score(fixed_str)
-                if fixed_str[6:8] in PlateRecognizer._KZ_REGIONS:
-                    fmt_score += 2
-                score = (fmt_score, native_score)
-                if score > best_score:
-                    best_score = score
-                    best = fixed_str
-            if best and best_score[0] >= 9:
-                return best
-
-        return text
+    # KZ plate utilities imported from kz_plate module
 
     def _run_pipeline_once(self, car_crop: np.ndarray, scale: float = 1.0,
                            return_bbox: bool = False
@@ -608,7 +426,7 @@ class PlateRecognizer:
 
         text = texts[0] if texts and len(texts) > 0 else ""
         text = text.replace(" ", "").upper()
-        text = self._fix_kz_plate(text)
+        text = fix_kz_plate(text)
 
         region = regions[0] if regions and len(regions) > 0 else "unknown"
 
@@ -667,55 +485,8 @@ class PlateRecognizer:
             return None
 
         text2 = r2[0]
-        text2 = self._fix_kz_plate(text2)
+        text2 = fix_kz_plate(text2)
         return (text2, plate_conf, r2[2], pw, ph, region)
-
-    @staticmethod
-    def _merge_texts_charwise(texts: list) -> str:
-        """Character-level majority voting across multiple OCR readings.
-
-        All texts must be the same length. For each position, the most
-        frequent character wins.  Ties are broken by preferring the
-        first (original-scale) reading.
-
-        Additionally groups visually confusable characters together:
-        if multiple scales disagree between e.g. A/Z/C, their votes
-        are pooled to pick the best candidate.
-        """
-        if not texts:
-            return ""
-        length = len(texts[0])
-        merged = []
-        for i in range(length):
-            counts: Dict[str, int] = {}
-            for t in texts:
-                if i < len(t):
-                    c = t[i]
-                    counts[c] = counts.get(c, 0) + 1
-            # Group confusable characters: pool votes for visually similar chars
-            grouped: Dict[str, int] = {}
-            used = set()
-            for c, cnt in sorted(counts.items(), key=lambda x: -x[1]):
-                if c in used:
-                    continue
-                group_total = cnt
-                used.add(c)
-                # Add votes from confusable chars
-                for alt in PlateRecognizer._LETTER_CONFUSIONS.get(c, []):
-                    if alt in counts and alt not in used:
-                        group_total += counts[alt]
-                        used.add(alt)
-                grouped[c] = group_total
-
-            # Pick character with most grouped votes; tie → first text wins
-            best_char = texts[0][i] if i < len(texts[0]) else ''
-            best_count = 0
-            for c, cnt in grouped.items():
-                if cnt > best_count:
-                    best_count = cnt
-                    best_char = c
-            merged.append(best_char)
-        return ''.join(merged)
 
     def _correct_from_history(self, track_id: int, text: str) -> str:
         """Use char_history to correct confusable letters.
@@ -754,9 +525,9 @@ class PlateRecognizer:
                 if alt_count < 2:
                     continue
                 # Check _OCR_PREFER for this pair (both directions)
-                preferred = self._OCR_PREFER.get((current, alt_char))
+                preferred = OCR_PREFER.get((current, alt_char))
                 if preferred is None:
-                    preferred = self._OCR_PREFER.get((alt_char, current))
+                    preferred = OCR_PREFER.get((alt_char, current))
                 if preferred and preferred != current and alt_count > best_alt_count:
                     best_alt = preferred
                     best_alt_count = alt_count
@@ -848,8 +619,8 @@ class PlateRecognizer:
                 kz_results = [r for r in results if len(r[0]) == 8]
                 if len(kz_results) >= 2:
                     texts = [r[0] for r in kz_results]
-                    merged_text = self._merge_texts_charwise(texts)
-                    merged_text = self._fix_kz_plate(merged_text)
+                    merged_text = merge_texts_charwise(texts)
+                    merged_text = fix_kz_plate(merged_text)
                     # Use metadata from highest plate_conf result
                     best_r = max(kz_results, key=lambda r: r[1])
                     return (merged_text, best_r[1], best_r[2], best_r[3], best_r[4], best_r[5])
@@ -873,8 +644,8 @@ class PlateRecognizer:
             kz_results = [r for r in results if len(r[0]) == 8]
             if len(kz_results) >= 2:
                 texts = [r[0] for r in kz_results]
-                merged = self._merge_texts_charwise(texts)
-                merged = self._fix_kz_plate(merged)
+                merged = merge_texts_charwise(texts)
+                merged = fix_kz_plate(merged)
                 best_r = max(kz_results, key=lambda r: r[1])
                 return (merged, best_r[1], best_r[2], best_r[3], best_r[4], best_r[5])
             return max(results, key=lambda r: r[1])
@@ -990,10 +761,10 @@ class PlateRecognizer:
 
         # Record per-position chars for cross-read correction
         # Only from structurally plausible KZ readings (filter garbage)
-        if len(text) == 8 and self._kz_score(text) >= 5:
+        if len(text) == 8 and kz_score(text) >= 5:
             for i, ch in enumerate(text):
                 self.char_history[track_id][i][ch] += 1
-        elif len(text) == 7 and self._kz_score_7(text) >= 4:
+        elif len(text) == 7 and kz_score_7(text) >= 4:
             for i, ch in enumerate(text):
                 self.char_history[track_id][i][ch] += 1
 

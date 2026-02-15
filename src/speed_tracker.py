@@ -68,10 +68,14 @@ class SpeedTracker:
         output_dir: str,
         camera_id: str = "camera_01",
         speed_limit: int = 70,
+        video_start_time: "datetime | None" = None,
+        video_fps: float = 25.0,
     ):
         self.output_dir = output_dir
         self.camera_id = camera_id
         self.speed_limit = speed_limit
+        self.video_start_time = video_start_time  # None = use system time
+        self.video_fps = video_fps
 
         self.speeds_dir = os.path.join(output_dir, "speeds")
         os.makedirs(self.speeds_dir, exist_ok=True)
@@ -93,6 +97,14 @@ class SpeedTracker:
         self._jsonl_lock = Lock()
 
         print(f"Speed limit: {speed_limit} km/h")
+
+    def _frame_timestamp(self, frame_idx: int) -> str:
+        """Compute timestamp for a frame. Uses video file time if available."""
+        if self.video_start_time is not None and frame_idx >= 0:
+            from datetime import timedelta
+            dt = self.video_start_time + timedelta(seconds=frame_idx / self.video_fps)
+            return dt.isoformat()
+        return datetime.now().isoformat()
 
     def update(
         self,
@@ -118,7 +130,7 @@ class SpeedTracker:
             event = SpeedEvent(
                 track_id=track_id,
                 speed_kmh=round(speed_kmh, 1),
-                timestamp=datetime.now().isoformat(),
+                timestamp=self._frame_timestamp(frame_idx),
                 frame_idx=frame_idx,
                 camera_id=self.camera_id,
                 speed_limit=self.speed_limit,

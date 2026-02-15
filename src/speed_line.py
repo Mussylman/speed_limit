@@ -6,23 +6,6 @@ import cv2
 import numpy as np
 
 
-# =====================================================
-# Улучшение изображения (контраст / резкость / яркость)
-# =====================================================
-def enhance_frame(frame, contrast=1.2, brightness=10, sharpen=True):
-    """Коррекция контраста и резкости кадра перед детекцией."""
-    frame = cv2.convertScaleAbs(frame, alpha=contrast, beta=brightness)
-    if sharpen:
-        kernel = np.array([[0, -1, 0],
-                           [-1, 5, -1],
-                           [0, -1, 0]])
-        frame = cv2.filter2D(frame, -1, kernel)
-    return frame
-
-
-# =====================================================
-# Класс зоны измерения скорости
-# =====================================================
 class SpeedLineZone:
     """Пара линий (start_line, end_line) и расстояние между ними в метрах."""
 

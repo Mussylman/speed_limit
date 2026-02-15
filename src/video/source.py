@@ -52,6 +52,7 @@ class VideoSource:
         prefetch_size: int = 8,
         reconnect_delay: float = 3.0,
         max_reconnects: int = 10,
+        no_drop: bool = False,
     ):
         self.url = url
         self.prefer_hw = prefer_hw
@@ -59,6 +60,7 @@ class VideoSource:
         self.prefetch_size = prefetch_size
         self.reconnect_delay = reconnect_delay
         self.max_reconnects = max_reconnects
+        self.no_drop = no_drop
 
         # Auto-detect source type
         if source_type:
@@ -200,6 +202,9 @@ class VideoSource:
 
     def _prefetch_loop(self):
         """Цикл prefetch с reconnect (RTSP) или EOF (видеофайл)"""
+        consecutive_failures = 0
+        max_consecutive_failures = 90  # переподключение после 90 неудачных чтений (~3 сек при 30fps)
+
         while not self._stop_event.is_set():
             if self._decoder is None or not self._decoder.is_opened():
                 if self.source_type == SourceType.VIDEO:
@@ -222,13 +227,21 @@ class VideoSource:
                     continue
 
                 self._reconnect_count = 0
+                consecutive_failures = 0
                 print(f"[VideoSource] Reconnected via {decoder_info.backend.value}")
 
             # Read frame
-            ok, frame = self._decoder.read()
+            try:
+                ok, frame = self._decoder.read()
+            except Exception as e:
+                print(f"[VideoSource] Read error: {e}")
+                ok, frame = False, None
+
             capture_ts = time.time()
 
             if ok and frame is not None:
+                consecutive_failures = 0
+
                 # Decode FPS counter
                 self._decode_count += 1
                 now = time.time()
@@ -238,15 +251,15 @@ class VideoSource:
                     self._decode_start = now
 
                 if self._prefetch_queue.full():
-                    if self.source_type == SourceType.RTSP:
-                        # RTSP: drop oldest to keep live current
+                    if self.source_type == SourceType.RTSP and not self.no_drop:
+                        # RTSP realtime: drop oldest to keep live current
                         try:
                             self._prefetch_queue.get_nowait()
                             self._frames_dropped += 1
                         except Empty:
                             pass
                     else:
-                        # Video file: wait for consumer (don't skip frames)
+                        # Video file OR no_drop mode: wait for consumer (don't skip frames)
                         while self._prefetch_queue.full() and not self._stop_event.is_set():
                             time.sleep(0.001)
 
@@ -256,8 +269,12 @@ class VideoSource:
                 self._prefetch_queue.put((False, None, 0.0))
                 break
             else:
-                # RTSP connection lost
-                self._decoder.close()
+                # RTSP: битый кадр или потеря соединения
+                consecutive_failures += 1
+                if consecutive_failures >= max_consecutive_failures:
+                    print(f"[VideoSource] {consecutive_failures} consecutive read failures, reconnecting...")
+                    self._decoder.close()
+                    consecutive_failures = 0
 
     # =========================================================
     # Public API
@@ -360,6 +377,8 @@ def create_source_from_config(
     cfg_cam: dict,
     camera_name: str,
     prefer_hw: bool = True,
+    no_drop: bool = False,
+    prefetch_size: int = 8,
 ) -> VideoSource:
     """Создаёт VideoSource из config_cam.yaml"""
     cred = cfg_cam.get("camera_credentials", {})
@@ -370,4 +389,9 @@ def create_source_from_config(
         raise ValueError(f"Camera {camera_name} not found in config")
 
     url = make_rtsp_url(cred, cam)
-    return VideoSource(url, source_type=SourceType.RTSP, prefer_hw=prefer_hw)
+    source = VideoSource(
+        url, source_type=SourceType.RTSP, prefer_hw=prefer_hw,
+        no_drop=no_drop, prefetch_size=prefetch_size,
+    )
+    source.info.name = camera_name  # Use config name (e.g. "Camera_21"), not IP
+    return source

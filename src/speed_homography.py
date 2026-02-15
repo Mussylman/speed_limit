@@ -64,8 +64,8 @@ class HomographySpeedEstimator:
         # Последние скорости: {obj_id: speed_kmh}
         self.speeds: Dict[int, float] = {}
 
-        # Для визуализации: {obj_id: [(x_m, y_m), ...]}
-        self.paths: Dict[int, List[Tuple[float, float]]] = {}
+        # Для визуализации: {obj_id: deque([(x_m, y_m), ...], maxlen=100)}
+        self.paths: Dict[int, deque] = {}
 
         # Кэш bird eye view (обновляется раз в N кадров)
         self._bev_cache: Optional[np.ndarray] = None
@@ -130,7 +130,7 @@ class HomographySpeedEstimator:
         # Инициализируем трек если нужно
         if obj_id not in self.tracks:
             self.tracks[obj_id] = deque(maxlen=self.smoothing_window * 2)
-            self.paths[obj_id] = []
+            self.paths[obj_id] = deque(maxlen=100)
 
         # Добавляем точку
         self.tracks[obj_id].append((frame_idx, x_m, y_m))

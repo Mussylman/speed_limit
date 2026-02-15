@@ -1,10 +1,71 @@
 # decoder.py
 # Аппаратное декодирование: NVDEC → GStreamer → FFmpeg fallback
+# Буфер RTSP настраивается автоматически по пингу
 
+import os
+import re
+import subprocess
 import cv2
 from typing import Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum
+
+
+def _ping_ms(host: str, timeout_s: int = 3) -> Optional[float]:
+    """Пинг хоста, возвращает RTT в мс или None если недоступен."""
+    try:
+        # Windows: ping -n 4 -w <timeout_ms>
+        result = subprocess.run(
+            ["ping", "-n", "4", "-w", str(timeout_s * 1000), host],
+            capture_output=True, text=True, timeout=timeout_s + 6,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
+        )
+        # Ищем "Average = Xms" (en) или "Среднее = Xмсек" (ru)
+        # м = кириллическая, m = латинская
+        m = re.search(r'[=<]\s*(\d+)\s*[мm]', result.stdout, re.IGNORECASE)
+        if m:
+            return float(m.group(1))
+    except Exception:
+        pass
+    return None
+
+
+def _apply_rtsp_buffer(host: str):
+    """Устанавливает OPENCV_FFMPEG_CAPTURE_OPTIONS по пингу к камере.
+
+    Пинг < 10мс  (LAN)        → буфер 2MB,  max_delay 200мс
+    Пинг 10-50мс (локальная)   → буфер 8MB,  max_delay 500мс
+    Пинг 50-200мс (интернет)   → буфер 32MB, max_delay 2000мс
+    Пинг > 200мс (плохая сеть) → буфер 64MB, max_delay 5000мс
+    Недоступен                  → максимальный буфер
+    """
+    rtt = _ping_ms(host)
+
+    if rtt is not None and rtt < 10:
+        # LAN — камера рядом
+        buf, delay, probe = 2 * 1024 * 1024, 200_000, 1_000_000
+        label = f"LAN ({rtt:.0f}ms)"
+    elif rtt is not None and rtt < 50:
+        # Ближний интернет / VPN
+        buf, delay, probe = 8 * 1024 * 1024, 500_000, 2_000_000
+        label = f"near ({rtt:.0f}ms)"
+    elif rtt is not None and rtt < 200:
+        # Удалённый интернет
+        buf, delay, probe = 32 * 1024 * 1024, 2_000_000, 5_000_000
+        label = f"remote ({rtt:.0f}ms)"
+    else:
+        # Плохая сеть (>200ms) или недоступен
+        buf, delay, probe = 64 * 1024 * 1024, 5_000_000, 10_000_000
+        label = f"bad link ({rtt:.0f}ms)" if rtt else "unreachable"
+
+    opts = f"rtsp_transport;tcp|buffer_size;{buf}|max_delay;{delay}|analyzeduration;{probe}|probesize;{probe}"
+    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = opts
+    print(f"[Decoder] Ping {host}: {label} → buffer={buf // (1024*1024)}MB, delay={delay // 1000}ms")
+
+
+# Дефолт для файлов (не RTSP)
+if "OPENCV_FFMPEG_CAPTURE_OPTIONS" not in os.environ:
+    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|buffer_size;2097152|max_delay;200000"
 
 
 class DecoderBackend(Enum):
@@ -60,17 +121,17 @@ class HWDecoder:
         try:
             if url.startswith("rtsp://"):
                 pipeline = (
-                    f'rtspsrc location="{url}" latency=100 ! '
+                    f'rtspsrc location="{url}" latency=2000 protocols=tcp ! '
                     f'rtph264depay ! h264parse ! nvh264dec ! '
                     f'videoconvert ! video/x-raw,format=BGR ! '
-                    f'appsink drop=1 max-buffers=2'
+                    f'appsink drop=0 max-buffers=64 sync=false'
                 )
             else:
                 pipeline = (
                     f'filesrc location="{url}" ! '
                     f'decodebin ! nvh264dec ! '
                     f'videoconvert ! video/x-raw,format=BGR ! '
-                    f'appsink drop=1 max-buffers=2'
+                    f'appsink drop=0 max-buffers=64 sync=false'
                 )
 
             cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
@@ -89,15 +150,15 @@ class HWDecoder:
         try:
             if url.startswith("rtsp://"):
                 pipeline = (
-                    f'rtspsrc location="{url}" latency=100 ! '
+                    f'rtspsrc location="{url}" latency=2000 protocols=tcp ! '
                     f'decodebin ! videoconvert ! '
-                    f'video/x-raw,format=BGR ! appsink drop=1'
+                    f'video/x-raw,format=BGR ! appsink drop=0 max-buffers=64 sync=false'
                 )
             else:
                 pipeline = (
                     f'filesrc location="{url}" ! '
                     f'decodebin ! videoconvert ! '
-                    f'video/x-raw,format=BGR ! appsink drop=1'
+                    f'video/x-raw,format=BGR ! appsink drop=0 max-buffers=64 sync=false'
                 )
 
             cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
@@ -128,6 +189,15 @@ class HWDecoder:
     def open(self, url: str) -> DecoderInfo:
         """Открывает видео с автоматическим выбором декодера"""
         self.close()
+
+        # Авто-буфер по пингу для RTSP
+        if url.startswith("rtsp://"):
+            # Извлекаем IP из rtsp://user:pass@IP:port/path
+            try:
+                host = url.split("@")[-1].split(":")[0].split("/")[0]
+                _apply_rtsp_buffer(host)
+            except Exception:
+                pass
 
         backends = [
             (DecoderBackend.NVDEC, self._try_nvdec),

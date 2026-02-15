@@ -52,10 +52,12 @@ class AsyncOCR:
         recognizer,
         max_queue_size: int = 64,
         num_workers: int = 1,
-        max_crop_width: int = 320,
+        max_crop_width: int = 640,
         good_conf_threshold: float = 0.88,
         cache_max_size: int = 200,
         cache_ttl_frames: int = 300,  # ~10 сек при 30 fps
+        batch_size: int = 4,
+        batch_timeout_ms: float = 50.0,
     ):
         self.recognizer = recognizer
         self.max_queue_size = max_queue_size
@@ -63,6 +65,8 @@ class AsyncOCR:
         self.good_conf_threshold = good_conf_threshold
         self.cache_max_size = cache_max_size
         self.cache_ttl_frames = cache_ttl_frames
+        self.batch_size = batch_size
+        self.batch_timeout_s = batch_timeout_ms / 1000.0
 
         # Очереди
         self.input_queue: Queue[OCRTask] = Queue(maxsize=max_queue_size)
@@ -87,7 +91,7 @@ class AsyncOCR:
         self.running = True
         self.workers = []
         for i in range(num_workers):
-            t = Thread(target=self._worker, name=f"OCR-Worker-{i}", daemon=True)
+            t = Thread(target=self._worker_batch, name=f"OCR-Worker-{i}", daemon=True)
             t.start()
             self.workers.append(t)
 
@@ -95,62 +99,71 @@ class AsyncOCR:
         self.results_cache: Dict[int, tuple] = {}
         self.cache_lock = Lock()
 
-    def _worker(self):
-        """OCR воркер в отдельном потоке"""
+    def _worker_batch(self):
+        """OCR batch worker: собирает до batch_size задач, обрабатывает пачкой."""
         while self.running:
+            # Собираем пачку задач
+            batch = []
             try:
                 task = self.input_queue.get(timeout=0.1)
+                if task is None:
+                    break
+                batch.append(task)
             except Empty:
                 continue
 
-            if task is None:  # stop signal
-                break
+            # Пытаемся набрать ещё (без долгого ожидания)
+            deadline = time.time() + self.batch_timeout_s
+            while len(batch) < self.batch_size and time.time() < deadline:
+                try:
+                    task = self.input_queue.get_nowait()
+                    if task is None:
+                        break
+                    batch.append(task)
+                except Empty:
+                    break
 
-            # Время в очереди
-            queue_time_ms = (time.time() - task.submit_time) * 1000
+            # Обрабатываем всю пачку
+            for task in batch:
+                queue_time_ms = (time.time() - task.submit_time) * 1000
 
-            # OCR
-            t_start = time.time()
-            try:
-                result = self.recognizer.process(
+                t_start = time.time()
+                try:
+                    result = self.recognizer.process(
+                        track_id=task.track_id,
+                        car_crop=task.crop,
+                        car_height=task.car_height,
+                        car_width=task.car_width,
+                        frame_idx=task.frame_idx,
+                        detection_conf=task.detection_conf,
+                    )
+                except Exception as e:
+                    print(f"\n[AsyncOCR] Error: {e}")
+                    result = None
+
+                processing_time_ms = (time.time() - t_start) * 1000
+
+                blur = getattr(self.recognizer, 'last_blur', 0.0)
+                brightness = getattr(self.recognizer, 'last_brightness', 0.0)
+
+                ocr_result = OCRResult(
                     track_id=task.track_id,
-                    car_crop=task.crop,
-                    car_height=task.car_height,
-                    car_width=task.car_width,
                     frame_idx=task.frame_idx,
-                    detection_conf=task.detection_conf,
+                    result=result,
+                    processing_time_ms=processing_time_ms,
+                    queue_time_ms=queue_time_ms,
+                    blur_score=blur,
+                    brightness_score=brightness,
                 )
-            except Exception as e:
-                print(f"\n[AsyncOCR] Error: {e}")
-                result = None
 
-            processing_time_ms = (time.time() - t_start) * 1000
+                self.output_queue.put(ocr_result)
 
-            # Получаем quality метрики из recognizer
-            blur = getattr(self.recognizer, 'last_blur', 0.0)
-            brightness = getattr(self.recognizer, 'last_brightness', 0.0)
+                with self.in_flight_lock:
+                    self.in_flight.discard(task.track_id)
 
-            # Результат
-            ocr_result = OCRResult(
-                track_id=task.track_id,
-                frame_idx=task.frame_idx,
-                result=result,
-                processing_time_ms=processing_time_ms,
-                queue_time_ms=queue_time_ms,
-                blur_score=blur,
-                brightness_score=brightness,
-            )
-
-            self.output_queue.put(ocr_result)
-
-            # [2] Убираем из in_flight
-            with self.in_flight_lock:
-                self.in_flight.discard(task.track_id)
-
-            # Статистика
-            self.stats["processed"] += 1
-            self.stats["total_queue_time_ms"] += queue_time_ms
-            self.stats["total_processing_time_ms"] += processing_time_ms
+                self.stats["processed"] += 1
+                self.stats["total_queue_time_ms"] += queue_time_ms
+                self.stats["total_processing_time_ms"] += processing_time_ms
 
     def submit(
         self,
@@ -179,20 +192,25 @@ class AsyncOCR:
                 return False
 
         # [3] Early stop: уже хороший результат → skip
+        # Только если результат валидный (нет reject_reason = прошёл фильтры)
         with self.cache_lock:
             cached = self.results_cache.get(track_id)
             if cached:
                 result, _ = cached
-                if result and hasattr(result, 'ocr_conf') and result.ocr_conf >= self.good_conf_threshold:
+                if (result and hasattr(result, 'ocr_conf')
+                        and result.ocr_conf >= self.good_conf_threshold
+                        and hasattr(result, 'reject_reason')
+                        and not result.reject_reason):
                     self.stats["dropped_good_conf"] += 1
                     return False
 
-        # [4] Resize crop для экономии памяти
+        # [4] Resize crop для экономии памяти (0 = no resize, quality max)
         # НЕ масштабируем car_height/car_width - они нужны оригинальные для фильтров!
-        h, w = crop.shape[:2]
-        if w > self.max_crop_width:
-            scale = self.max_crop_width / w
-            crop = cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+        if self.max_crop_width > 0:
+            h, w = crop.shape[:2]
+            if w > self.max_crop_width:
+                scale = self.max_crop_width / w
+                crop = cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
 
         # Добавляем в in_flight
         with self.in_flight_lock:

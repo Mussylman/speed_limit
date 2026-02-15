@@ -7,42 +7,16 @@ import cv2
 import time
 import datetime
 import numpy as np
-from typing import Tuple
-from threading import Thread
-from queue import Queue
+from collections import deque
 
 from config import BASE_DIR, HEADLESS
 from pipeline_builder import create_yolo, create_speed_estimator, create_ocr
 from speed_tracker import SpeedTracker
 from metrics_logger import MetricsLogger
 from file_logger import FileLogger
-
-
-class AsyncVideoWriter:
-    """Async video writing in a separate thread"""
-    def __init__(self, path: str, fourcc: int, fps: float, size: Tuple[int, int]):
-        self.writer = cv2.VideoWriter(path, fourcc, fps, size)
-        self.queue: Queue = Queue(maxsize=30)
-        self.running = True
-        self.thread = Thread(target=self._write_loop, daemon=True)
-        self.thread.start()
-
-    def _write_loop(self):
-        while self.running or not self.queue.empty():
-            try:
-                frame = self.queue.get(timeout=0.1)
-                self.writer.write(frame)
-            except:
-                pass
-
-    def write(self, frame: np.ndarray):
-        if not self.queue.full():
-            self.queue.put(frame.copy())
-
-    def release(self):
-        self.running = False
-        self.thread.join(timeout=5.0)
-        self.writer.release()
+from report_generator import ReportGenerator
+from video.source import SourceType
+from video.writer import AsyncVideoWriter
 
 
 def draw_results_panel(frame, passed_results, speed_tracker, speed_limit):
@@ -101,9 +75,20 @@ def process_source(source, cfg, cam_cfg):
     out_dir = os.path.join(BASE_DIR, cfg["output_dir"], f"{name}_run_{timestamp}")
     os.makedirs(out_dir, exist_ok=True)
 
+    run_start_time = datetime.datetime.now()
+    run_start_epoch = time.time()
+
     print(f"\nStart: {name}")
+    if cfg.get("_quality_mode") == "max":
+        print(f"{'='*50}")
+        print(f"  QUALITY MODE: MAX (offline, no limits)")
+        print(f"  yolo_imgsz={cfg.get('yolo_imgsz')}, min_conf={cfg.get('_yolo_min_conf')}")
+        print(f"  ocr_cooldown=0, quality_gate=OFF, blur_filter=OFF, min_confirm={cfg.get('_min_confirmations', 2)}")
+        print(f"  no_drop={cfg.get('_no_drop', False)}, prefetch={cfg.get('_prefetch_size', 8)}")
+        print(f"{'='*50}")
     print(f"Output: {out_dir}")
     print(f"Backend: {source.info.backend}")
+    print(f"Resolution: {source.info.width}x{source.info.height} @ {source.info.fps:.1f} fps")
 
     # --- Pipeline components via builder ---
     async_yolo, use_half, yolo_imgsz = create_yolo(cfg)
@@ -113,6 +98,16 @@ def process_source(source, cfg, cam_cfg):
 
     fps = source.info.fps if source.info.fps > 0 else cfg.get("fps", 30)
 
+    # Compute video start time from file modification date for video files
+    video_start_time = None
+    if source.source_type == SourceType.VIDEO and os.path.isfile(source.url):
+        try:
+            mtime = os.path.getmtime(source.url)
+            duration = source.info.total_frames / fps if fps > 0 else 0
+            video_start_time = datetime.datetime.fromtimestamp(mtime - duration)
+        except Exception:
+            pass
+
     speed, speed_method = create_speed_estimator(cfg, cam_cfg, name, fps, source=source)
     show_bird_eye = False
     if speed_method == "homography":
@@ -121,20 +116,31 @@ def process_source(source, cfg, cam_cfg):
     else:
         print("Speed: LINES")
 
-    recognizer, async_ocr = create_ocr(cfg, name, out_dir)
+    recognizer, async_ocr = create_ocr(cfg, name, out_dir, cam_config=cam_cfg)
+
+    # Pass video time to OCR for accurate timestamps on cards
+    if video_start_time is not None:
+        recognizer.video_start_time = video_start_time
+        recognizer.video_fps = fps
+
+    # Per-camera settings
+    from pipeline_builder import _get_camera_settings
+    cam_settings = _get_camera_settings(cam_cfg, name)
 
     plate_format = cfg.get("plate_format_regex", "")
     print(f"OCR: NomeroffNet (ASYNC)")
-    print(f"   Car: >= {cfg.get('min_car_height', 150)}x{cfg.get('min_car_width', 100)} px")
+    print(f"   Car: >= {recognizer.min_car_height}x{recognizer.min_car_width} px")
     print(f"   Plate: >= {cfg.get('min_plate_width', 60)}x{cfg.get('min_plate_height', 15)} px")
     print(f"   Format: {plate_format if plate_format else 'any'}")
     print(f"   Cooldown: {cfg.get('ocr_cooldown_frames', 3)} frames")
+    print(f"   Min confirmations: {recognizer.min_confirmations}")
 
-    # Parameters
+    # Parameters (per-camera overrides global)
     ocr_conf_threshold = float(cfg.get("ocr_conf_threshold", 0.5))
     frame_skip = int(cfg.get("frame_skip", 1))
     show_window = bool(cfg.get("show_window", True)) and not HEADLESS
-    speed_limit = int(cfg.get("speed_limit", 70))
+    speed_limit = int(cam_settings.get("speed_limit", cfg.get("speed_limit", 70)))
+    no_drop = cfg.get("_no_drop", False)
 
     print(f"YOLO: imgsz={yolo_imgsz}, skip={frame_skip}")
 
@@ -143,6 +149,8 @@ def process_source(source, cfg, cam_cfg):
         output_dir=out_dir,
         camera_id=name,
         speed_limit=speed_limit,
+        video_start_time=video_start_time,
+        video_fps=fps,
     )
 
     # Metrics
@@ -172,6 +180,11 @@ def process_source(source, cfg, cam_cfg):
     cached_detections = []
     last_yolo_frame = 0
     last_yolo_time_ms = 0
+    bev_cache = None  # bird's eye view cache
+
+    # Bbox extrapolation: per-track velocity (dx, dy per frame)
+    track_prev_pos = {}   # {obj_id: (cx, cy, frame_idx)}
+    track_velocity = {}   # {obj_id: (dx_per_frame, dy_per_frame)}
 
     # Display FPS control
     target_frame_time = 1.0 / fps
@@ -183,13 +196,19 @@ def process_source(source, cfg, cam_cfg):
     display_fps_start = time.time()
 
     # Latency tracking
-    from collections import deque
     latency_history = deque(maxlen=300)
     latency_ms = 0.0
     latency_p95 = 0.0
     latency_calc_time = time.time()
 
-    while True:
+    # Compact status log
+    status_interval = 10.0
+    last_status_time = time.time()
+    prev_dropped = 0
+    null_frames = 0
+
+    try:
+      while True:
         frame_start_time = time.time()
 
         # Display FPS
@@ -203,6 +222,7 @@ def process_source(source, cfg, cam_cfg):
         ok, frame, capture_ts = source.read()
 
         if not ok or frame is None:
+            null_frames += 1
             if show_window:
                 cv2.imshow(name, np.zeros((360, 640, 3), dtype=np.uint8))
                 if cv2.waitKey(1) & 0xFF == ord("q"):
@@ -221,15 +241,64 @@ def process_source(source, cfg, cam_cfg):
 
         frame_idx += 1
 
-        # === SUBMIT TO YOLO (async, every Nth frame) ===
-        if frame_skip <= 1 or frame_idx % frame_skip == 0:
-            async_yolo.submit(frame, frame_idx)
+        # === COMPACT STATUS LOG (every N seconds) ===
+        now_status = time.time()
+        if now_status - last_status_time >= status_interval:
+            dropped_now = source.frames_dropped if hasattr(source, 'frames_dropped') else 0
+            new_drops = dropped_now - prev_dropped
+            prev_dropped = dropped_now
+            dec_fps_val = source.decode_fps if hasattr(source, 'decode_fps') else 0
+            q_sz_val = source.queue_size if hasattr(source, 'queue_size') else 0
+            q_cap_val = source.queue_capacity if hasattr(source, 'queue_capacity') else 0
+            rc = getattr(source, '_reconnect_count', 0)
 
-        # === GET YOLO RESULTS (non-blocking) ===
-        for yolo_result in async_yolo.get_results():
+            ocr_stats = recognizer.stats
+            ocr_async = async_ocr.get_stats()
+            yolo_stats = async_yolo.get_stats()
+
+            total_speeds = len(speed_tracker.speeds)
+            violations = speed_tracker.stats.get("violations", 0)
+            passed_plates = len(recognizer.passed_results)
+
+            uptime = now_status - display_fps_start if display_fps > 0 else 0
+
+            print(f"\n{'='*70}")
+            print(f"[STREAM] FPS:{display_fps:.1f} decode:{dec_fps_val:.0f} queue:{q_sz_val}/{q_cap_val} "
+                  f"drop:{new_drops} null:{null_frames} reconnect:{rc} lat:{latency_ms:.0f}ms(p95:{latency_p95:.0f})")
+            print(f"[YOLO]   submit:{yolo_stats['submitted']} done:{yolo_stats['processed']} "
+                  f"drop:{yolo_stats['dropped']} time:{last_yolo_time_ms:.0f}ms")
+            print(f"[OCR]    called:{ocr_stats['ocr_called']} no_plate:{ocr_stats['ocr_no_plate']} "
+                  f"skip: size={ocr_stats['skipped_car_size']} blur={ocr_stats['skipped_quality']} "
+                  f"dup={ocr_stats['skipped_not_better']} cool={ocr_stats['skipped_cooldown']} "
+                  f"fmt={ocr_stats['skipped_format']} chars={ocr_stats['skipped_chars']} "
+                  f"plate_sz={ocr_stats['skipped_plate_size']} "
+                  f"low_conf={ocr_stats['skipped_low_conf']} unconf={ocr_stats['unconfirmed']}")
+            print(f"[OCR-Q]  submit:{ocr_async['submitted']} done:{ocr_async['processed']} "
+                  f"drop: full={ocr_async['dropped_full']} flight={ocr_async['dropped_in_flight']} "
+                  f"good={ocr_async['dropped_good_conf']}")
+            print(f"[RESULT] cars:{total_speeds} plates:{passed_plates} violations:{violations}")
+            print(f"{'='*70}")
+
+            null_frames = 0
+            last_status_time = now_status
+
+        # === SUBMIT TO YOLO (async, every Nth frame) ===
+        submitted_yolo = False
+        if frame_skip <= 1 or frame_idx % frame_skip == 0:
+            async_yolo.submit(frame, frame_idx, blocking=no_drop)
+            submitted_yolo = True
+
+        # === GET YOLO RESULTS ===
+        # no_drop (quality max): ждём результат синхронно → bbox точно на кадре
+        # realtime: забираем что есть без ожидания
+        for yolo_result in async_yolo.get_results(blocking=no_drop and submitted_yolo):
             metrics.start_frame(yolo_result.frame_idx)
             last_yolo_time_ms = yolo_result.processing_time_ms
             last_yolo_frame = yolo_result.frame_idx
+
+            # Store full frame (JPEG) for OCR results with OSD timestamp
+            _, jpg_buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
+            recognizer.full_frames[yolo_result.frame_idx] = jpg_buf
 
             cached_detections = []
 
@@ -246,6 +315,17 @@ def process_source(source, cfg, cam_cfg):
             for det in detections:
                 obj_id = det.obj_id
                 x1i, y1i, x2i, y2i = det.box
+                cx = (x1i + x2i) // 2
+                cy = (y1i + y2i) // 2
+
+                # Считаем скорость bbox (пикселей/кадр) для экстраполяции
+                prev = track_prev_pos.get(obj_id)
+                if prev:
+                    px, py, pf = prev
+                    df = yolo_result.frame_idx - pf
+                    if df > 0:
+                        track_velocity[obj_id] = ((cx - px) / df, (cy - py) / df)
+                track_prev_pos[obj_id] = (cx, cy, yolo_result.frame_idx)
 
                 speed.process(yolo_result.frame_idx, obj_id, det.cx, det.cy)
 
@@ -325,12 +405,31 @@ def process_source(source, cfg, cam_cfg):
         if speed_method == "lines" and hasattr(speed, 'draw_zones'):
             speed.draw_zones(raw_frame)
 
+        # Сколько кадров прошло с последнего YOLO результата
+        frame_delta = frame_idx - last_yolo_frame
+
         for det in cached_detections:
             x1i, y1i, x2i, y2i = det['box']
             obj_id = det['obj_id']
             plate_text = det['plate_text']
             plate_conf = det['plate_conf']
             current_speed = det['speed']
+
+            # Экстраполяция bbox: сдвигаем по скорости трека
+            vel = track_velocity.get(obj_id)
+            if vel and frame_delta > 0:
+                dx = int(vel[0] * frame_delta)
+                dy = int(vel[1] * frame_delta)
+                h_frame, w_frame = raw_frame.shape[:2]
+                x1i = max(0, min(w_frame - 1, x1i + dx))
+                y1i = max(0, min(h_frame - 1, y1i + dy))
+                x2i = max(0, min(w_frame, x2i + dx))
+                y2i = max(0, min(h_frame, y2i + dy))
+
+            # Пропускаем мелкие детекции (тени, далёкие объекты)
+            bw, bh = x2i - x1i, y2i - y1i
+            if bw < 80 or bh < 60:
+                continue
 
             box_color = (0, 255, 0) if plate_conf >= ocr_conf_threshold else (0, 255, 255)
             cv2.rectangle(raw_frame, (x1i, y1i), (x2i, y2i), box_color, 2)
@@ -346,54 +445,61 @@ def process_source(source, cfg, cam_cfg):
                 cv2.putText(raw_frame, f"{current_speed:.0f} km/h", (x1i, y1i - 35),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.8, c, 2)
 
+        # --- Overlays for recording (always) ---
+        if recognizer.passed_results:
+            raw_frame = draw_results_panel(
+                raw_frame, recognizer.passed_results,
+                speed_tracker, speed_limit
+            )
+
+        if show_bird_eye and speed_method == "homography":
+            if last_yolo_frame == frame_idx or bev_cache is None:
+                bev_cache = speed.draw_bird_eye_view(size=(300, 400), frame_idx=frame_idx)
+            bev = bev_cache
+            bev_h, bev_w = bev.shape[:2]
+            raw_frame[10:10+bev_h, raw_frame.shape[1]-bev_w-10:raw_frame.shape[1]-10] = bev
+
+        mx = 290
+        cv2.putText(raw_frame, f"FPS: {display_fps:.1f} | YOLO: {metrics.current_fps:.1f}", (mx, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        dec_fps = source.decode_fps if hasattr(source, 'decode_fps') else 0
+        q_sz = source.queue_size if hasattr(source, 'queue_size') else 0
+        q_cap = source.queue_capacity if hasattr(source, 'queue_capacity') else 0
+        dropped = source.frames_dropped if hasattr(source, 'frames_dropped') else 0
+        cv2.putText(raw_frame, f"Decode: {dec_fps:.0f} | Q: {q_sz}/{q_cap} | Drop: {dropped}", (mx, 55),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1)
+        lat_color = (0, 255, 0) if latency_ms < 100 else (0, 200, 255) if latency_ms < 200 else (0, 0, 255)
+        cv2.putText(raw_frame, f"Latency: {latency_ms:.0f}ms (p95: {latency_p95:.0f}ms)", (mx, 78),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, lat_color, 1)
+
+        # Passed rate (live)
+        total_v = len(speed_tracker.speeds)
+        passed_v = len(recognizer.passed_results)
+        passed_pct = (passed_v / total_v * 100) if total_v > 0 else 0
+        pct_color = (0, 255, 0) if passed_pct > 50 else (0, 200, 255) if passed_pct > 20 else (0, 0, 255)
+        cv2.putText(raw_frame, f"Passed: {passed_v}/{total_v} ({passed_pct:.0f}%)", (mx, 101),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, pct_color, 1)
+
+        # --- Video recording (always) ---
+        if video_writer is None:
+            h, w = raw_frame.shape[:2]
+            video_writer = AsyncVideoWriter(video_out_path, fps, (w, h))
+            print(f"Recording: {video_out_path} (async, {fps:.0f} fps, {w}x{h})")
+        video_writer.write(raw_frame)
+
+        # --- Window display (optional) ---
         if show_window:
-            if recognizer.passed_results:
-                raw_frame = draw_results_panel(
-                    raw_frame, recognizer.passed_results,
-                    speed_tracker, speed_limit
-                )
-
-            if show_bird_eye and speed_method == "homography":
-                if last_yolo_frame == frame_idx or not hasattr(process_source, '_bev_cache'):
-                    process_source._bev_cache = speed.draw_bird_eye_view(size=(300, 400), frame_idx=frame_idx)
-                bev = process_source._bev_cache
-                bev_h, bev_w = bev.shape[:2]
-                raw_frame[10:10+bev_h, raw_frame.shape[1]-bev_w-10:raw_frame.shape[1]-10] = bev
-
-            mx = 290
-            cv2.putText(raw_frame, f"FPS: {display_fps:.1f} | YOLO: {metrics.current_fps:.1f}", (mx, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-            dec_fps = source.decode_fps if hasattr(source, 'decode_fps') else 0
-            q_sz = source.queue_size if hasattr(source, 'queue_size') else 0
-            q_cap = source.queue_capacity if hasattr(source, 'queue_capacity') else 0
-            dropped = source.frames_dropped if hasattr(source, 'frames_dropped') else 0
-            cv2.putText(raw_frame, f"Decode: {dec_fps:.0f} | Q: {q_sz}/{q_cap} | Drop: {dropped}", (mx, 55),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1)
-            lat_color = (0, 255, 0) if latency_ms < 100 else (0, 200, 255) if latency_ms < 200 else (0, 0, 255)
-            cv2.putText(raw_frame, f"Latency: {latency_ms:.0f}ms (p95: {latency_p95:.0f}ms)", (mx, 78),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, lat_color, 1)
-
-            # Passed rate (live)
-            total_v = len(speed_tracker.speeds)
-            passed_v = len(recognizer.passed_results)
-            passed_pct = (passed_v / total_v * 100) if total_v > 0 else 0
-            pct_color = (0, 255, 0) if passed_pct > 50 else (0, 200, 255) if passed_pct > 20 else (0, 0, 255)
-            cv2.putText(raw_frame, f"Passed: {passed_v}/{total_v} ({passed_pct:.0f}%)", (mx, 101),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, pct_color, 1)
-
-            if video_writer is None:
-                h, w = raw_frame.shape[:2]
-                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                video_writer = AsyncVideoWriter(video_out_path, fourcc, fps, (w, h))
-                print(f"Recording: {video_out_path} (async, {fps:.0f} fps)")
-            video_writer.write(raw_frame)
-
             cv2.imshow(name, raw_frame)
 
             elapsed = time.time() - frame_start_time
             wait_ms = max(1, int((target_frame_time - elapsed) * 1000))
             if cv2.waitKey(wait_ms) & 0xFF == ord("q"):
                 break
+        else:
+            # Headless: allow Ctrl+C, no FPS throttle
+            pass
+    except KeyboardInterrupt:
+        print("\nCtrl+C — saving results...")
 
     # Cleanup
     source.release()
@@ -413,6 +519,22 @@ def process_source(source, cfg, cam_cfg):
     recognizer.finalize()
     speed_tracker.finalize()
     metrics.finalize()
+
+    # --- Client report ---
+    duration_sec = time.time() - run_start_epoch
+    coords = cfg.get("coordinates")
+    coords = tuple(coords) if coords else None
+    report_gen = ReportGenerator(out_dir, name, speed_limit,
+                                     address=cfg.get("address", ""),
+                                     coordinates=coords)
+    vid_path = video_out_path if video_writer is not None else None
+    report_gen.generate(
+        passed_results=recognizer.passed_results,
+        speed_tracker=speed_tracker,
+        video_path=vid_path,
+        start_time=run_start_time,
+        duration_sec=duration_sec,
+    )
 
     # Passed rate: recognized plates / unique vehicles
     total_vehicles = speed_tracker.stats["unique_vehicles"]

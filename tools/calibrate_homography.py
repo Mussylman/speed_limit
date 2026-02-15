@@ -1,36 +1,38 @@
 # calibrate_homography.py
-# Утилита для калибровки гомографии (перспектива → bird's eye view)
-# Кликаете 4 точки на дороге, вводите реальные размеры → получаете матрицу
+# Kalibrovka gomografii (perspektiva -> bird's eye view)
+# Klikaete 4 tochki na doroge, vvodite razmery -> poluchaete matricu
 
 import cv2
 import numpy as np
 import yaml
 import argparse
 import os
+import sys
+
+# Fix Windows console encoding
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 points = []
 frame_display = None
 
 
 def click_event(event, x, y, flags, param):
-    """Обработчик кликов мыши"""
     global points, frame_display
 
     if event == cv2.EVENT_LBUTTONDOWN and len(points) < 4:
         points.append([x, y])
-        print(f"📍 Точка {len(points)}: ({x}, {y})")
+        print(f"  Tochka {len(points)}: ({x}, {y})")
 
-        # Рисуем точку
         cv2.circle(frame_display, (x, y), 8, (0, 255, 0), -1)
         cv2.putText(frame_display, str(len(points)), (x + 10, y - 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
-        # Рисуем линии между точками
         if len(points) > 1:
             cv2.line(frame_display, tuple(points[-2]), tuple(points[-1]), (0, 255, 0), 2)
         if len(points) == 4:
             cv2.line(frame_display, tuple(points[3]), tuple(points[0]), (0, 255, 0), 2)
-            print("\n✅ 4 точки выбраны! Нажмите любую клавишу для продолжения...")
+            print("\n  4 tochki vybrany! Nazhmite lyubuyu klavishu...")
 
         cv2.imshow("Calibration", frame_display)
 
@@ -38,12 +40,19 @@ def click_event(event, x, y, flags, param):
 def main():
     global frame_display, points
 
-    parser = argparse.ArgumentParser(description="Калибровка гомографии для измерения скорости")
-    parser.add_argument("--video", required=True, help="Путь к видео или изображению")
-    parser.add_argument("--output", default="homography_config.yaml", help="Файл для сохранения")
+    parser = argparse.ArgumentParser(description="Calibration homography")
+    parser.add_argument("--video", required=True, help="Path to video or image")
+    parser.add_argument("--camera", type=str, default=None, help="Camera name")
+    parser.add_argument("--output", default=None, help="Output file")
     args = parser.parse_args()
 
-    # Загружаем кадр
+    if args.output is None:
+        if args.camera:
+            args.output = f"config/homography_{args.camera}.yaml"
+        else:
+            args.output = "homography_config.yaml"
+
+    # Load frame
     if args.video.lower().endswith(('.jpg', '.png', '.jpeg')):
         frame = cv2.imread(args.video)
     else:
@@ -51,62 +60,64 @@ def main():
         ret, frame = cap.read()
         cap.release()
         if not ret:
-            print("❌ Не удалось прочитать видео")
+            print("ERROR: cannot read video")
             return
+
+    if frame is None:
+        print(f"ERROR: cannot read {args.video}")
+        return
 
     frame_display = frame.copy()
     h, w = frame.shape[:2]
 
     print("=" * 60)
-    print("🎯 КАЛИБРОВКА ГОМОГРАФИИ")
+    print("  KALIBROVKA GOMOGRAFII")
     print("=" * 60)
-    print(f"Разрешение: {w}x{h}")
+    print(f"  Resolution: {w}x{h}")
+    if args.camera:
+        print(f"  Camera: {args.camera}")
+    print(f"  Output: {args.output}")
     print()
-    print("📌 Инструкция:")
-    print("   Кликните 4 точки на дороге, образующие прямоугольник")
-    print("   в РЕАЛЬНОМ мире (например, углы полосы движения)")
+    print("  Kliknite 4 tochki na doroge (pryamougolnik):")
     print()
-    print("   Порядок точек:")
-    print("   1 ●─────────● 2    (дальняя сторона)")
-    print("     │         │")
-    print("     │ дорога  │")
-    print("     │         │")
-    print("   4 ●─────────● 3    (ближняя сторона)")
+    print("   1 *-----------* 2    (daleko)")
+    print("     |           |")
+    print("     |  doroga   |")
+    print("     |           |")
+    print("   4 *-----------* 3    (blizko)")
     print()
-    print("   Лучше всего использовать разметку или края полосы")
+    print("  Ispolzuite razmetku ili kraya polosy")
     print("=" * 60)
 
     cv2.imshow("Calibration", frame_display)
     cv2.setMouseCallback("Calibration", click_event)
 
-    # Ждём 4 клика
     while len(points) < 4:
         key = cv2.waitKey(100)
         if key == 27:  # ESC
-            print("❌ Отменено")
+            print("Cancelled")
             cv2.destroyAllWindows()
             return
 
     cv2.waitKey(0)
     cv2.destroyAllWindows()
 
-    # Запрашиваем реальные размеры
+    # Real dimensions
     print()
-    print("📐 Введите реальные размеры прямоугольника:")
+    print("  Vvedite razmery pryamougolnika:")
 
     try:
-        width_m = float(input("   Ширина (точки 1-2 и 4-3) в метрах [3.5]: ") or "3.5")
-        length_m = float(input("   Длина (точки 1-4 и 2-3) в метрах [20]: ") or "20")
+        width_m = float(input("   Shirina (1-2 i 4-3) v metrah [3.5]: ") or "3.5")
+        length_m = float(input("   Dlina (1-4 i 2-3) v metrah [20]: ") or "20")
     except ValueError:
-        print("❌ Неверный ввод")
+        print("ERROR: wrong input")
         return
 
-    # Исходные точки (пиксели)
+    # Source points (pixels)
     src_pts = np.float32(points)
 
-    # Целевые точки (метры, bird's eye view)
-    # Масштаб: 100 пикселей = 1 метр (для визуализации)
-    scale = 100
+    # Destination points (meters, bird's eye view)
+    scale = 100  # 100 px = 1 meter
     dst_pts = np.float32([
         [0, 0],
         [width_m * scale, 0],
@@ -114,10 +125,10 @@ def main():
         [0, length_m * scale]
     ])
 
-    # Вычисляем матрицу гомографии
+    # Homography matrix
     H, status = cv2.findHomography(src_pts, dst_pts)
 
-    # Сохраняем
+    # Save config
     config = {
         "homography": {
             "src_points": [list(map(int, p)) for p in points],
@@ -129,43 +140,43 @@ def main():
         }
     }
 
+    os.makedirs(os.path.dirname(args.output) if os.path.dirname(args.output) else ".", exist_ok=True)
     with open(args.output, "w", encoding="utf-8") as f:
         yaml.dump(config, f, sort_keys=False, allow_unicode=True, default_flow_style=None)
 
-    # Также сохраняем матрицу отдельно
+    # Save matrix separately
     matrix_file = args.output.replace(".yaml", "_matrix.npy")
     np.save(matrix_file, H)
 
     print()
     print("=" * 60)
-    print("✅ КАЛИБРОВКА ЗАВЕРШЕНА")
+    print("  KALIBROVKA ZAVERSHENA")
     print("=" * 60)
-    print(f"📄 Конфиг: {args.output}")
-    print(f"📄 Матрица: {matrix_file}")
+    print(f"  Config: {args.output}")
+    print(f"  Matrix: {matrix_file}")
     print()
-    print("Исходные точки (пиксели):")
+    print("  Source points (pixels):")
     for i, p in enumerate(points, 1):
         print(f"   {i}: {p}")
     print()
-    print(f"Реальные размеры: {width_m}м × {length_m}м")
+    print(f"  Real size: {width_m}m x {length_m}m")
     print()
-    print("Матрица гомографии:")
+    print("  Homography matrix:")
     print(H)
     print()
 
-    # Показываем bird's eye view для проверки
-    print("🔍 Показываю Bird's Eye View для проверки...")
+    # Show bird's eye view
+    print("  Bird's Eye View...")
 
     bev_w = int(width_m * scale) + 100
     bev_h = int(length_m * scale) + 100
 
-    # Смещаем целевые точки для отступа
     dst_pts_shifted = dst_pts + np.array([50, 50])
     H_display, _ = cv2.findHomography(src_pts, dst_pts_shifted)
 
     bev = cv2.warpPerspective(frame, H_display, (bev_w, bev_h))
 
-    # Рисуем сетку (каждый метр)
+    # Grid (every meter)
     for i in range(int(width_m) + 1):
         x = 50 + i * scale
         cv2.line(bev, (x, 50), (x, 50 + int(length_m * scale)), (0, 255, 0), 1)
@@ -173,12 +184,12 @@ def main():
         y = 50 + i * scale
         cv2.line(bev, (50, y), (50 + int(width_m * scale), y), (0, 255, 0), 1)
 
-    cv2.putText(bev, "Bird's Eye View (1 клетка = 1м)", (10, 30),
+    cv2.putText(bev, "Bird's Eye View (1 cell = 1m)", (10, 30),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
     cv2.imshow("Bird's Eye View", bev)
     cv2.imshow("Original", frame)
-    print("Нажмите любую клавишу для выхода...")
+    print("  Press any key to exit...")
     cv2.waitKey(0)
     cv2.destroyAllWindows()
 
