@@ -9,6 +9,7 @@ import threading
 from queue import Queue, Empty
 from dataclasses import dataclass
 from typing import Optional, List, Any
+import cv2
 import numpy as np
 
 
@@ -60,6 +61,8 @@ class AsyncYOLO:
         tracker: str = "bytetrack.yaml",
         max_queue_size: int = 3,
         min_conf: float = 0.5,
+        gpu_lock=None,
+        max_detect_size: int = 0,
     ):
         self.model = model
         self.imgsz = imgsz
@@ -67,6 +70,8 @@ class AsyncYOLO:
         self.half = half
         self.tracker = tracker
         self.min_conf = min_conf
+        self.gpu_lock = gpu_lock
+        self.max_detect_size = max_detect_size  # max frame height for detection (0=no resize)
 
         # Очередь кадров (size=3 чтобы не терять кадры с хорошими номерами)
         self.input_queue: Queue[YOLOTask] = Queue(maxsize=max_queue_size)
@@ -81,6 +86,8 @@ class AsyncYOLO:
             "submitted": 0,
             "processed": 0,
             "dropped": 0,
+            "gpu_lock_wait_ms": 0.0,  # total time waiting for gpu_lock
+            "gpu_lock_count": 0,      # number of lock acquisitions
         }
 
     def _worker(self):
@@ -98,19 +105,39 @@ class AsyncYOLO:
 
             # YOLO inference
             t_start = time.time()
-            frame = task.frame
-            h, w = frame.shape[:2]
+            orig_frame = task.frame
+            h, w = orig_frame.shape[:2]
+
+            # Pre-resize for detection: YOLO gets smaller frame,
+            # but crops are cut from original for OCR quality
+            detect_frame = orig_frame
+            scale_back = 1.0
+            if self.max_detect_size > 0 and h > self.max_detect_size:
+                scale_back = h / self.max_detect_size
+                new_h = self.max_detect_size
+                new_w = int(w / scale_back)
+                detect_frame = cv2.resize(orig_frame, (new_w, new_h),
+                                          interpolation=cv2.INTER_AREA)
 
             try:
-                results = self.model.track(
-                    frame,
-                    imgsz=self.imgsz,
-                    classes=self.classes,
-                    persist=True,
-                    verbose=False,
-                    half=self.half,
-                    tracker=self.tracker,
-                )
+                if self.gpu_lock:
+                    t_lock = time.time()
+                    self.gpu_lock.acquire()
+                    self.stats["gpu_lock_wait_ms"] += (time.time() - t_lock) * 1000
+                    self.stats["gpu_lock_count"] += 1
+                try:
+                    results = self.model.track(
+                        detect_frame,
+                        imgsz=self.imgsz,
+                        classes=self.classes,
+                        persist=True,
+                        verbose=False,
+                        half=self.half,
+                        tracker=self.tracker,
+                    )
+                finally:
+                    if self.gpu_lock:
+                        self.gpu_lock.release()
                 processing_time_ms = (time.time() - t_start) * 1000
 
                 # Извлекаем детекции и вырезаем crops
@@ -123,27 +150,31 @@ class AsyncYOLO:
                     confs = boxes_obj.conf.cpu().numpy()
 
                     for i in range(len(ids)):
-                        x1, y1, x2, y2 = xyxy[i]
+                        # Bbox в координатах detect_frame → scale back
+                        x1 = xyxy[i][0] * scale_back
+                        y1 = xyxy[i][1] * scale_back
+                        x2 = xyxy[i][2] * scale_back
+                        y2 = xyxy[i][3] * scale_back
                         obj_id = int(ids[i])
                         conf = float(confs[i])
 
                         if conf < self.min_conf:
                             continue
 
-                        # Clip to frame bounds
+                        # Clip to original frame bounds
                         x1i, y1i = max(0, int(x1)), max(0, int(y1))
                         x2i, y2i = min(w, int(x2)), min(h, int(y2))
 
                         if x2i <= x1i or y2i <= y1i:
                             continue
 
-                        # Вырезаем crop (копия, т.к. frame будет переиспользован)
-                        crop = frame[y1i:y2i, x1i:x2i].copy()
+                        # Crop из оригинала (полное разрешение для OCR)
+                        crop = orig_frame[y1i:y2i, x1i:x2i].copy()
 
                         if crop.size == 0:
                             continue
 
-                        # Центр для скорости
+                        # Центр для скорости (в оригинальных координатах)
                         cx = int((x1 + x2) / 2)
                         cy = int(y2)
 
@@ -250,8 +281,13 @@ class AsyncYOLO:
 
     def get_stats(self) -> dict:
         """Получить статистику."""
-        return {
+        s = {
             **self.stats,
             "input_queue_size": self.input_queue.qsize(),
             "output_queue_size": self.output_queue.qsize(),
         }
+        if s["gpu_lock_count"] > 0:
+            s["gpu_lock_avg_ms"] = s["gpu_lock_wait_ms"] / s["gpu_lock_count"]
+        else:
+            s["gpu_lock_avg_ms"] = 0.0
+        return s

@@ -69,7 +69,8 @@ def draw_results_panel(frame, passed_results, speed_tracker, speed_limit):
     return frame
 
 
-def process_source(source, cfg, cam_cfg):
+def process_source(source, cfg, cam_cfg, cross_queue=None, start_time=None,
+                   shared_pipeline=None, nomeroff_lock=None, yolo_lock=None):
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     name = source.info.name
     out_dir = os.path.join(BASE_DIR, cfg["output_dir"], f"{name}_run_{timestamp}")
@@ -91,22 +92,47 @@ def process_source(source, cfg, cam_cfg):
     print(f"Resolution: {source.info.width}x{source.info.height} @ {source.info.fps:.1f} fps")
 
     # --- Pipeline components via builder ---
-    async_yolo, use_half, yolo_imgsz = create_yolo(cfg)
+    async_yolo, use_half, yolo_imgsz = create_yolo(cfg, gpu_lock=yolo_lock)
 
     if use_half:
         print("YOLO: FP16 mode enabled")
 
     fps = source.info.fps if source.info.fps > 0 else cfg.get("fps", 30)
 
-    # Compute video start time from file modification date for video files
-    video_start_time = None
-    if source.source_type == SourceType.VIDEO and os.path.isfile(source.url):
-        try:
-            mtime = os.path.getmtime(source.url)
-            duration = source.info.total_frames / fps if fps > 0 else 0
-            video_start_time = datetime.datetime.fromtimestamp(mtime - duration)
-        except Exception:
-            pass
+    # Video start time: --start-time (manual) > meta.json > filename > file mtime
+    video_start_time = start_time  # from CLI --start-time
+    if video_start_time is None and source.source_type == SourceType.VIDEO and os.path.isfile(source.url):
+        import re, json as _json
+        # Try meta.json in same directory (saved by record_stream.py)
+        video_dir = os.path.dirname(os.path.abspath(source.url))
+        meta_path = os.path.join(video_dir, "meta.json")
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path) as f:
+                    meta = _json.load(f)
+                video_start_time = datetime.datetime.fromtimestamp(meta["start_epoch"])
+                print(f"Video start: {video_start_time.strftime('%d-%m-%Y %H:%M:%S')} (from meta.json)")
+            except Exception:
+                pass
+        # Fallback: parse from filename
+        if video_start_time is None:
+            basename = os.path.basename(source.url)
+            m = re.search(r'(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})', basename)
+            if m:
+                try:
+                    video_start_time = datetime.datetime.strptime(m.group(1), "%Y-%m-%d_%H-%M-%S")
+                except ValueError:
+                    pass
+        # Fallback: file mtime
+        if video_start_time is None:
+            try:
+                mtime = os.path.getmtime(source.url)
+                duration = source.info.total_frames / fps if fps > 0 else 0
+                video_start_time = datetime.datetime.fromtimestamp(mtime - duration)
+            except Exception:
+                pass
+    if video_start_time and start_time is None:
+        print(f"Video start: {video_start_time.strftime('%d-%m-%Y %H:%M:%S')}")
 
     speed, speed_method = create_speed_estimator(cfg, cam_cfg, name, fps, source=source)
     show_bird_eye = False
@@ -116,7 +142,9 @@ def process_source(source, cfg, cam_cfg):
     else:
         print("Speed: LINES")
 
-    recognizer, async_ocr = create_ocr(cfg, name, out_dir, cam_config=cam_cfg)
+    recognizer, async_ocr = create_ocr(cfg, name, out_dir, cam_config=cam_cfg,
+                                       shared_pipeline=shared_pipeline,
+                                       nomeroff_lock=nomeroff_lock)
 
     # Pass video time to OCR for accurate timestamps on cards
     if video_start_time is not None:
@@ -126,6 +154,7 @@ def process_source(source, cfg, cam_cfg):
     # Per-camera settings
     from pipeline_builder import _get_camera_settings
     cam_settings = _get_camera_settings(cam_cfg, name)
+    recognizer.camera_label = cam_settings.get("label", "")
 
     plate_format = cfg.get("plate_format_regex", "")
     print(f"OCR: NomeroffNet (ASYNC)")
@@ -142,7 +171,9 @@ def process_source(source, cfg, cam_cfg):
     speed_limit = int(cam_settings.get("speed_limit", cfg.get("speed_limit", 70)))
     no_drop = cfg.get("_no_drop", False)
 
-    print(f"YOLO: imgsz={yolo_imgsz}, skip={frame_skip}")
+    detect_sz = cfg.get("_yolo_max_detect_size", 0)
+    detect_info = f", detect_resize={detect_sz}p" if detect_sz else ""
+    print(f"YOLO: imgsz={yolo_imgsz}, skip={frame_skip}{detect_info}")
 
     # Speed tracker (domain: per-vehicle max speed, violations, raw stream)
     speed_tracker = SpeedTracker(
@@ -201,6 +232,9 @@ def process_source(source, cfg, cam_cfg):
     latency_p95 = 0.0
     latency_calc_time = time.time()
 
+    # Cross-camera: track which track_ids already emitted
+    cross_emitted = set()
+
     # Compact status log
     status_interval = 10.0
     last_status_time = time.time()
@@ -223,6 +257,10 @@ def process_source(source, cfg, cam_cfg):
 
         if not ok or frame is None:
             null_frames += 1
+            # Video file EOF: prefetch thread ended, queue drained
+            if source.source_type == SourceType.VIDEO and source._prefetch_thread is not None:
+                if not source._prefetch_thread.is_alive() and source._prefetch_queue.empty():
+                    break
             if show_window:
                 cv2.imshow(name, np.zeros((360, 640, 3), dtype=np.uint8))
                 if cv2.waitKey(1) & 0xFF == ord("q"):
@@ -265,9 +303,15 @@ def process_source(source, cfg, cam_cfg):
             print(f"\n{'='*70}")
             print(f"[STREAM] FPS:{display_fps:.1f} decode:{dec_fps_val:.0f} queue:{q_sz_val}/{q_cap_val} "
                   f"drop:{new_drops} null:{null_frames} reconnect:{rc} lat:{latency_ms:.0f}ms(p95:{latency_p95:.0f})")
+            yolo_lock_avg = yolo_stats.get('gpu_lock_avg_ms', 0)
+            yolo_lock_info = f" lock_wait:{yolo_lock_avg:.0f}ms" if yolo_lock_avg > 0 else ""
             print(f"[YOLO]   submit:{yolo_stats['submitted']} done:{yolo_stats['processed']} "
-                  f"drop:{yolo_stats['dropped']} time:{last_yolo_time_ms:.0f}ms")
-            print(f"[OCR]    called:{ocr_stats['ocr_called']} no_plate:{ocr_stats['ocr_no_plate']} "
+                  f"drop:{yolo_stats['dropped']} time:{last_yolo_time_ms:.0f}ms{yolo_lock_info}")
+
+            ocr_lock_cnt = ocr_stats.get('nomeroff_lock_count', 0)
+            ocr_lock_avg = (ocr_stats['nomeroff_lock_wait_ms'] / ocr_lock_cnt) if ocr_lock_cnt > 0 else 0
+            ocr_lock_info = f" lock_wait:{ocr_lock_avg:.0f}ms" if ocr_lock_avg > 0 else ""
+            print(f"[OCR]    called:{ocr_stats['ocr_called']} no_plate:{ocr_stats['ocr_no_plate']}{ocr_lock_info} "
                   f"skip: size={ocr_stats['skipped_car_size']} blur={ocr_stats['skipped_quality']} "
                   f"dup={ocr_stats['skipped_not_better']} cool={ocr_stats['skipped_cooldown']} "
                   f"fmt={ocr_stats['skipped_format']} chars={ocr_stats['skipped_chars']} "
@@ -398,6 +442,18 @@ def process_source(source, cfg, cam_cfg):
                     conf=ocr_result.result.ocr_conf,
                     passed=True,
                 )
+                # Cross-camera: emit first confirmed plate per track
+                if cross_queue and ocr_result.track_id not in cross_emitted:
+                    try:
+                        cross_queue.put_nowait({
+                            "camera_id": name,
+                            "plate_text": ocr_result.result.plate_text,
+                            "timestamp": time.time(),
+                            "frame_idx": ocr_result.frame_idx,
+                        })
+                        cross_emitted.add(ocr_result.track_id)
+                    except Exception:
+                        pass  # queue full — skip
 
         # === DRAWING (every frame) ===
         raw_frame = frame.copy()
@@ -503,7 +559,8 @@ def process_source(source, cfg, cam_cfg):
 
     # Cleanup
     source.release()
-    cv2.destroyAllWindows()
+    if show_window:
+        cv2.destroyAllWindows()
 
     if video_writer is not None:
         video_writer.release()

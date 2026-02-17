@@ -19,7 +19,7 @@ def apply_quality_preset(cfg: dict, quality: str):
     cfg["_quality_mode"] = "max"
 
     # YOLO: larger input, lower confidence threshold
-    cfg["yolo_imgsz"] = 1280
+    cfg.setdefault("yolo_imgsz", 1280)  # use config value if set, else 1280
     cfg["_yolo_max_queue"] = 64
     cfg["_yolo_min_conf"] = 0.25
 
@@ -41,8 +41,9 @@ def apply_quality_preset(cfg: dict, quality: str):
     cfg["_no_drop"] = True
     cfg["_prefetch_size"] = 64
 
-    # OCR: full resolution crops (no resize)
+    # OCR: full resolution crops (no resize), all scales
     cfg["_max_crop_width"] = 0  # 0 = no resize
+    cfg["_ocr_max_scales"] = 6  # all scales + plate-zoom
 
     # Speed: wider smoothing window
     hom = cfg.get("homography", {})
@@ -50,7 +51,30 @@ def apply_quality_preset(cfg: dict, quality: str):
     cfg["homography"] = hom
 
 
-def create_yolo(config: dict):
+def create_shared_nomeroff_pipeline(config: dict):
+    """Load NomeroffNet pipeline once for sharing across cameras.
+
+    Returns the pipeline object.
+    """
+    from nomeroff_net import pipeline
+
+    model_path = os.path.join(
+        BASE_DIR, "nomeroff-net", "data", "models", "Detector",
+        "yolov11x", "yolov11x-keypoints-2024-10-11.engine",
+    )
+    print("Loading shared NomeroffNet...")
+    p = pipeline(
+        "number_plate_detection_and_reading_runtime",
+        off_number_plate_classification=False,
+        default_label="kz",
+        default_lines_count=1,
+        path_to_model=model_path,
+    )
+    print("Shared NomeroffNet ready (yolov11x-keypoints TensorRT, classification ON)")
+    return p
+
+
+def create_yolo(config: dict, gpu_lock=None):
     """Create YOLO model + AsyncYOLO wrapper.
 
     Returns (async_yolo, use_half, yolo_imgsz).
@@ -79,6 +103,8 @@ def create_yolo(config: dict):
         tracker="bytetrack.yaml",
         max_queue_size=int(config.get("_yolo_max_queue", 3)),
         min_conf=float(config.get("_yolo_min_conf", 0.5)),
+        gpu_lock=gpu_lock,
+        max_detect_size=int(config.get("_yolo_max_detect_size", 0)),
     )
 
     return async_yolo, use_half, yolo_imgsz
@@ -172,7 +198,8 @@ def create_speed_estimator(config: dict, cam_config: dict, camera_id: str,
     return speed, "lines"
 
 
-def create_ocr(config: dict, camera_id: str, output_dir: str, cam_config: dict = None):
+def create_ocr(config: dict, camera_id: str, output_dir: str, cam_config: dict = None,
+               shared_pipeline=None, nomeroff_lock=None):
     """Create PlateRecognizer + AsyncOCR.
 
     Per-camera settings (min_car_height, etc.) from config_cam.yaml
@@ -197,8 +224,8 @@ def create_ocr(config: dict, camera_id: str, output_dir: str, cam_config: dict =
         min_plate_chars=int(config.get("min_plate_chars", 8)),
         min_car_height=int(_get("min_car_height", 150)),
         min_car_width=int(_get("min_car_width", 100)),
-        min_plate_width=int(config.get("min_plate_width", 60)),
-        min_plate_height=int(config.get("min_plate_height", 15)),
+        min_plate_width=int(_get("min_plate_width", 60)),
+        min_plate_height=int(_get("min_plate_height", 15)),
         cooldown_frames=int(config.get("ocr_cooldown_frames", 3)),
         plate_format_regex=config.get("plate_format_regex", ""),
         min_blur_score=float(config.get("_min_blur_score", 5.0)),
@@ -206,6 +233,9 @@ def create_ocr(config: dict, camera_id: str, output_dir: str, cam_config: dict =
         max_brightness=float(config.get("_max_brightness", 240.0)),
         quality_improvement=float(config.get("_quality_improvement", 1.0)),
         min_confirmations=int(config.get("_min_confirmations", 2)),
+        shared_pipeline=shared_pipeline,
+        nomeroff_lock=nomeroff_lock,
+        ocr_max_scales=int(config.get("_ocr_max_scales", 6)),
     )
 
     max_crop_w = int(config.get("_max_crop_width", 640))

@@ -34,6 +34,7 @@ class PlateEvent:
     event_id: str = ""
     timestamp: str = ""
     camera_id: str = ""
+    camera_label: str = ""
     track_id: int = 0
     frame_idx: int = 0
 
@@ -119,9 +120,13 @@ class PlateRecognizer:
         no_plate_cooldown_sec: float = 0.3,
         video_start_time=None,
         video_fps: float = 25.0,
+        shared_pipeline=None,
+        nomeroff_lock=None,
+        ocr_max_scales: int = 6,
     ):
         self.output_dir = output_dir
         self.camera_id = camera_id
+        self.camera_label = ""
         self.video_start_time = video_start_time
         self.video_fps = video_fps
         self.min_conf = min_conf
@@ -147,16 +152,22 @@ class PlateRecognizer:
         self.res_ocr_dir = os.path.join(output_dir, "res_ocr")
         os.makedirs(self.res_ocr_dir, exist_ok=True)
 
-        # NomeroffNet с классификацией (нужна для OCR confidence)
-        print("Loading NomeroffNet...")
-        self.pipeline = pipeline(
-            "number_plate_detection_and_reading_runtime",
-            off_number_plate_classification=False,  # ON — даёт реальный ocr_conf
-            default_label="kz",                     # Казахстан
-            default_lines_count=1,
-            path_to_model=os.path.join(os.path.dirname(os.path.dirname(__file__)), "nomeroff-net", "data", "models", "Detector", "yolov11x", "yolov11x-keypoints-2024-10-11.engine"),
-        )
-        print("NomeroffNet ready (yolov11x-keypoints TensorRT, classification ON, default=kz)")
+        # NomeroffNet: use shared pipeline if provided, else load own
+        self.nomeroff_lock = nomeroff_lock
+        self.ocr_max_scales = ocr_max_scales
+        if shared_pipeline is not None:
+            self.pipeline = shared_pipeline
+            print(f"NomeroffNet: using shared pipeline (max_scales={ocr_max_scales})")
+        else:
+            print("Loading NomeroffNet...")
+            self.pipeline = pipeline(
+                "number_plate_detection_and_reading_runtime",
+                off_number_plate_classification=False,  # ON — даёт реальный ocr_conf
+                default_label="kz",                     # Казахстан
+                default_lines_count=1,
+                path_to_model=os.path.join(os.path.dirname(os.path.dirname(__file__)), "nomeroff-net", "data", "models", "Detector", "yolov11x", "yolov11x-keypoints-2024-10-11.engine"),
+            )
+            print("NomeroffNet ready (yolov11x-keypoints TensorRT, classification ON, default=kz)")
 
         # Для 1080p кропы машин ≤960px — resize не нужен
         self.max_ocr_width = 0  # 0 = no resize
@@ -212,6 +223,8 @@ class PlateRecognizer:
             "skipped_low_conf": 0,
             "unconfirmed": 0,
             "passed": 0,
+            "nomeroff_lock_wait_ms": 0.0,
+            "nomeroff_lock_count": 0,
         }
 
         # Последние метрики качества (для логирования)
@@ -396,7 +409,16 @@ class PlateRecognizer:
         If return_bbox=True, appends (x1, y1, x2, y2) pixel coords in car_crop.
         """
         rgb = cv2.cvtColor(car_crop, cv2.COLOR_BGR2RGB)
-        res = self.pipeline([rgb])
+        if self.nomeroff_lock:
+            t_lock = time.time()
+            self.nomeroff_lock.acquire()
+            self.stats["nomeroff_lock_wait_ms"] += (time.time() - t_lock) * 1000
+            self.stats["nomeroff_lock_count"] += 1
+        try:
+            res = self.pipeline([rgb])
+        finally:
+            if self.nomeroff_lock:
+                self.nomeroff_lock.release()
 
         if isinstance(res, (list, tuple)) and len(res) > 0:
             data = res[0]
@@ -567,45 +589,54 @@ class PlateRecognizer:
                 return self._run_pipeline_once(crop, scale)
 
             # For small crops: multi-scale OCR with character-level voting
+            # ocr_max_scales limits pipeline calls (2=fast live, 6=full offline)
             if w < 960:
                 results = []
+                n_calls = 0
+                max_calls = self.ocr_max_scales
                 # Scale 1: original
                 r = self._run_pipeline_once(car_crop, 1.0)
+                n_calls += 1
                 if r:
                     results.append(r)
                 # Scale 2: upscale to 480px (skip if already bigger)
-                if w < 480:
+                if n_calls < max_calls and w < 480:
                     s2 = 480 / w
                     crop2 = cv2.resize(car_crop, None, fx=s2, fy=s2, interpolation=cv2.INTER_LANCZOS4)
                     r = self._run_pipeline_once(crop2, s2)
+                    n_calls += 1
                     if r:
                         results.append(r)
                 # Scale 3: upscale to 640px (skip if already bigger)
-                if w < 640:
+                if n_calls < max_calls and w < 640:
                     s3 = 640 / w
                     crop3 = cv2.resize(car_crop, None, fx=s3, fy=s3, interpolation=cv2.INTER_LANCZOS4)
                     r = self._run_pipeline_once(crop3, s3)
+                    n_calls += 1
                     if r:
                         results.append(r)
                 # Scale 4: upscale to 800px
-                if w < 800:
+                if n_calls < max_calls and w < 800:
                     s4 = 800 / w
                     crop4 = cv2.resize(car_crop, None, fx=s4, fy=s4, interpolation=cv2.INTER_LANCZOS4)
                     r = self._run_pipeline_once(crop4, s4)
+                    n_calls += 1
                     if r:
                         results.append(r)
                 # Scale 5: upscale to 960px
-                if w < 960:
+                if n_calls < max_calls and w < 960:
                     s5 = 960 / w
                     crop5 = cv2.resize(car_crop, None, fx=s5, fy=s5, interpolation=cv2.INTER_LANCZOS4)
                     r = self._run_pipeline_once(crop5, s5)
+                    n_calls += 1
                     if r:
                         results.append(r)
 
                 # Plate-zoom: detect plate bbox, extract & zoom, re-OCR
-                zoom_r = self._reocr_plate_zoom(car_crop, target_plate_width=400)
-                if zoom_r:
-                    results.append(zoom_r)
+                if n_calls < max_calls:
+                    zoom_r = self._reocr_plate_zoom(car_crop, target_plate_width=400)
+                    if zoom_r:
+                        results.append(zoom_r)
 
                 if not results:
                     self.stats["skipped_plate_size"] += 1
@@ -628,14 +659,15 @@ class PlateRecognizer:
                 # Fallback: return highest plate_conf result
                 return max(results, key=lambda r: r[1])
 
-            # Normal size crop: also try plate-zoom
+            # Normal size crop: also try plate-zoom if scales allow
             results = []
             r = self._run_pipeline_once(car_crop, 1.0)
             if r:
                 results.append(r)
-            zoom_r = self._reocr_plate_zoom(car_crop, target_plate_width=400)
-            if zoom_r:
-                results.append(zoom_r)
+            if self.ocr_max_scales >= 2:
+                zoom_r = self._reocr_plate_zoom(car_crop, target_plate_width=400)
+                if zoom_r:
+                    results.append(zoom_r)
             if not results:
                 return None
             if len(results) == 1:
@@ -802,6 +834,7 @@ class PlateRecognizer:
             event_id=str(uuid.uuid4())[:8],
             timestamp=evt_ts,
             camera_id=self.camera_id,
+            camera_label=self.camera_label,
             track_id=track_id,
             frame_idx=frame_idx,
             # Три score

@@ -108,6 +108,7 @@ class ReportGenerator:
                 "car_score": car_score,
                 "plate_score": plate_score,
                 "ocr_score": ocr_score,
+                "camera_label": pe.camera_label if pe and hasattr(pe, "camera_label") else "",
             })
         return vehicles
 
@@ -182,10 +183,15 @@ class ReportGenerator:
         # --- Header (dark panel with date + address) ---
         cv2.rectangle(card, (0, 0), (self.CARD_W, header_h), (45, 45, 45), -1)
 
-        # Line 1: date only
+        # Line 1: date (left) + camera label (right)
         date_str = self._format_datetime(v["timestamp"])
         cv2.putText(card, date_str, (15, 25),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, self.WHITE, 1)
+        cam_label = v.get("camera_label", "")
+        if cam_label:
+            lbl_size = cv2.getTextSize(cam_label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
+            cv2.putText(card, cam_label, (self.CARD_W - lbl_size[0] - 15, 25),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, self.YELLOW, 2)
 
         # Line 2: address + coordinates (PIL for Cyrillic support)
         addr_line = self.address or ""

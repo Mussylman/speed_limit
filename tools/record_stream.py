@@ -103,6 +103,18 @@ def record_camera(
             last_report = start_time
             print(f"[{camera_name}] Recording started!")
 
+            # Save meta.json with precise Python start time
+            import json
+            meta = {
+                "camera": camera_name,
+                "start_epoch": start_time,
+                "start_time": datetime.datetime.fromtimestamp(start_time).isoformat(),
+                "file": os.path.basename(out_path),
+            }
+            meta_path = os.path.join(output_dir, "meta.json")
+            with open(meta_path, "w") as f:
+                json.dump(meta, f, indent=2)
+
             while True:
                 retcode = proc.poll()
                 if retcode is not None:

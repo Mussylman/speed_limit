@@ -266,8 +266,11 @@ class VideoSource:
                 self._prefetch_queue.put((True, frame, capture_ts))
 
             elif self.source_type == SourceType.VIDEO:
-                self._prefetch_queue.put((False, None, 0.0))
-                break
+                consecutive_failures += 1
+                if consecutive_failures >= max_consecutive_failures:
+                    # Real EOF or too many corrupted frames
+                    self._prefetch_queue.put((False, None, 0.0))
+                    break
             else:
                 # RTSP: битый кадр или потеря соединения
                 consecutive_failures += 1

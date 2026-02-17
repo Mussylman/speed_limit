@@ -49,6 +49,7 @@ class HomographySpeedEstimator:
         self.max_speed_kmh = max_speed_kmh
         self.min_speed_kmh = min_speed_kmh
         self.speed_correction = speed_correction
+        print(f"   Speed correction: {speed_correction}")
 
         # Загружаем матрицу гомографии
         if homography_config:
@@ -234,7 +235,7 @@ class HomographySpeedEstimator:
         # Определяем границы (автоматически по всем трекам)
         all_points = []
         for path in self.paths.values():
-            all_points.extend(path[-50:])  # последние 50 точек
+            all_points.extend(list(path)[-50:])
 
         if not all_points:
             return canvas
@@ -271,7 +272,7 @@ class HomographySpeedEstimator:
                 continue
 
             color = colors[idx % len(colors)]
-            recent = path[-30:]  # последние 30 точек
+            recent = list(path)[-30:]
 
             # Линия пути
             pts = [to_canvas(p[0], p[1]) for p in recent]
