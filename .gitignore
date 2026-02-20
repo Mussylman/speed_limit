@@ -36,10 +36,10 @@ config/config_cam.yaml
 config/homography_config_matrix.npy
 
 # === Node.js (frontend) ===
-sergek-frontend/node_modules/
-sergek-frontend/dist/
-sergek-frontend/dist-ssr/
-sergek-frontend/.env.local
+frontend/node_modules/
+frontend/dist/
+frontend/dist-ssr/
+frontend/.env.local
 
 # === IDE / OS ===
 .vscode/

@@ -23,10 +23,12 @@ CHAR_TO_LETTER = {
 LETTER_CONFUSIONS = {
     'A': ['Z', 'H'],
     'C': ['G', 'O', 'Z'],
-    'Z': ['A', 'C', '2'],
+    'Z': ['A', 'C', 'I', 'L', '2'],
+    'I': ['T', 'Z', 'A', 'L'],
     'N': ['H', 'M'],
     'H': ['N', 'A'],
     'T': ['I', 'Y'],
+    'M': ['N', 'H'],
     'E': ['F', 'B'],
 }
 
@@ -127,6 +129,11 @@ def fix_kz_plate(text: str) -> str:
     if len(text) == 7:
         fixed7_str = ''.join(fix_kz_7chars(list(text)))
 
+        # Если 7-символьный номер идеально соответствует формату XXX YY XX
+        # и регион валидный — не расширять до 8 символов
+        if kz_score_7(fixed7_str) == 7 and fixed7_str[5:7] in KZ_REGIONS:
+            return fixed7_str
+
         # Пробуем вставить букву в позиции 3,4,5
         best = None
         best_score = -1
@@ -216,8 +223,74 @@ def merge_texts_charwise(texts: list) -> str:
             if cnt > best_count:
                 best_count = cnt
                 best_char = c
+            elif cnt == best_count and cnt > 0:
+                # Тай-брейк через OCR_PREFER
+                pair = (best_char, c)
+                if pair in OCR_PREFER:
+                    best_char = OCR_PREFER[pair]
+                pair_rev = (c, best_char)
+                if pair_rev in OCR_PREFER:
+                    best_char = OCR_PREFER[pair_rev]
         merged.append(best_char)
     return ''.join(merged)
+
+
+def ocr_variants(text: str) -> list:
+    """Генерирует варианты номера с учётом OCR-путаниц (A↔Z, H↔N и т.д.).
+
+    Для 8-символьного KZ номера подставляет LETTER_CONFUSIONS
+    в буквенные позиции (3-5). Возвращает список уникальных вариантов
+    (включая оригинал).
+    """
+    if len(text) != 8:
+        return [text]
+    variants = {text}
+    for pos in range(3, 6):
+        ch = text[pos]
+        alts = LETTER_CONFUSIONS.get(ch, [])
+        for alt in alts:
+            if alt.isalpha():
+                v = text[:pos] + alt + text[pos + 1:]
+                variants.add(v)
+    return list(variants)
+
+
+def match_plate_fuzzy(plate: str, known: set) -> str:
+    """Если plate нет в known, ищет OCR-вариант который есть.
+
+    Возвращает найденный вариант или оригинал.
+    """
+    if plate in known:
+        return plate
+    for v in ocr_variants(plate):
+        if v in known:
+            return v
+    return plate
+
+
+def ocr_distance(plate1: str, plate2: str) -> float:
+    """Confusion-aware distance between two plates (same length).
+
+    Known OCR confusions (LETTER_CONFUSIONS, CHAR_TO_DIGIT/LETTER)
+    cost 0.5 per position; unknown differences cost 1.0.
+    """
+    if len(plate1) != len(plate2):
+        return float(max(len(plate1), len(plate2)))
+    dist = 0.0
+    for c1, c2 in zip(plate1, plate2):
+        if c1 == c2:
+            continue
+        # Check known letter confusions (bidirectional)
+        if c2 in LETTER_CONFUSIONS.get(c1, []) or c1 in LETTER_CONFUSIONS.get(c2, []):
+            dist += 0.5
+        # Check digit↔letter confusions
+        elif CHAR_TO_DIGIT.get(c1) == c2 or CHAR_TO_DIGIT.get(c2) == c1:
+            dist += 0.5
+        elif CHAR_TO_LETTER.get(c1) == c2 or CHAR_TO_LETTER.get(c2) == c1:
+            dist += 0.5
+        else:
+            dist += 1.0
+    return dist
 
 
 def levenshtein_distance(s1: str, s2: str) -> int:

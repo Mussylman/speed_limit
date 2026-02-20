@@ -36,6 +36,17 @@ def _file_size_mb(path):
         return 0.0
 
 
+def _save_stop_meta(meta_path, meta, stop_time, elapsed, size_mb):
+    """Update meta JSON with stop time and duration."""
+    import json
+    meta["stop_epoch"] = stop_time
+    meta["stop_time"] = datetime.datetime.fromtimestamp(stop_time).isoformat()
+    meta["duration_sec"] = round(elapsed, 1)
+    meta["size_mb"] = round(size_mb, 1)
+    with open(meta_path, "w") as f:
+        json.dump(meta, f, indent=2)
+
+
 def record_camera(
     rtsp_url: str,
     camera_name: str,
@@ -103,25 +114,27 @@ def record_camera(
             last_report = start_time
             print(f"[{camera_name}] Recording started!")
 
-            # Save meta.json with precise Python start time
+            # Save meta per camera with start time
             import json
+            meta_path = os.path.join(output_dir, f"meta_{camera_name}.json")
             meta = {
                 "camera": camera_name,
+                "file": os.path.basename(out_path),
                 "start_epoch": start_time,
                 "start_time": datetime.datetime.fromtimestamp(start_time).isoformat(),
-                "file": os.path.basename(out_path),
             }
-            meta_path = os.path.join(output_dir, "meta.json")
             with open(meta_path, "w") as f:
                 json.dump(meta, f, indent=2)
 
             while True:
                 retcode = proc.poll()
                 if retcode is not None:
-                    elapsed = time.time() - start_time
+                    stop_time = time.time()
+                    elapsed = stop_time - start_time
                     size_mb = _file_size_mb(out_path)
                     total_mb += size_mb
                     total_files += 1
+                    _save_stop_meta(meta_path, meta, stop_time, elapsed, size_mb)
                     print(f"[{camera_name}] Stream ended after {elapsed:.0f}s "
                           f"({size_mb:.1f} MB). Total: {total_files} files, {total_mb:.1f} MB")
                     break
@@ -147,9 +160,12 @@ def record_camera(
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
+            stop_time = time.time()
+            elapsed = stop_time - start_time
             size_mb = _file_size_mb(out_path)
             total_mb += size_mb
             total_files += 1
+            _save_stop_meta(meta_path, meta, stop_time, elapsed, size_mb)
             print(f"[{camera_name}] Saved: {out_path} ({size_mb:.1f} MB)")
             print(f"[{camera_name}] Total: {total_files} files, {total_mb:.1f} MB")
             return
@@ -168,6 +184,31 @@ def record_camera(
     print(f"[{camera_name}] Total: {total_files} files, {total_mb:.1f} MB in {output_dir}")
 
 
+def remux_fragmented(mp4_path):
+    """Remux fragmented MP4 to proper MP4 with moov atom (for OpenCV)."""
+    fixed_path = mp4_path.replace(".mp4", "_fixed.mp4")
+    cmd = [
+        "ffmpeg", "-y", "-i", mp4_path,
+        "-c", "copy", "-movflags", "+faststart",
+        fixed_path,
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, timeout=120)
+        if result.returncode == 0 and os.path.exists(fixed_path):
+            size_mb = os.path.getsize(fixed_path) / (1024 * 1024)
+            # Replace original with fixed
+            os.remove(mp4_path)
+            os.rename(fixed_path, mp4_path)
+            print(f"  Remuxed: {os.path.basename(mp4_path)} ({size_mb:.1f} MB)")
+            return True
+        else:
+            print(f"  Remux failed: {os.path.basename(mp4_path)}")
+            return False
+    except Exception as e:
+        print(f"  Remux error: {e}")
+        return False
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Record RTSP streams (FFmpeg -c copy, no re-encoding)",
@@ -175,6 +216,8 @@ def main():
     )
     parser.add_argument("--camera", type=str, nargs="+", required=True,
                         help="Camera name(s) from config_cam.yaml")
+    parser.add_argument("--name", type=str, default=None,
+                        help="Test name (e.g. '15' for 15 km/h). Saves to records/<name>/")
     parser.add_argument("--output", type=str, default=None,
                         help="Output directory (default: records/)")
     args = parser.parse_args()
@@ -184,6 +227,8 @@ def main():
     cameras = cam_cfg.get("cameras", [])
 
     out_base = args.output or os.path.join(BASE_DIR, "records")
+    if args.name:
+        out_base = os.path.join(out_base, args.name)
     session_ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
     if len(args.camera) == 1:
@@ -193,21 +238,34 @@ def main():
             sys.exit(f"Camera '{cam_name}' not found in config_cam.yaml")
 
         url = make_rtsp_url(cred, cam)
-        out_dir = os.path.join(out_base, f"{cam_name}_{session_ts}")
+        out_dir = out_base if args.name else os.path.join(out_base, f"{cam_name}_{session_ts}")
 
         print(f"{'='*50}")
         print(f"  RTSP RECORDER")
         print(f"  Camera:  {cam_name} ({cam['ip']})")
         print(f"  Mode:    -c copy (zero CPU, no quality loss)")
         print(f"  Output:  {out_dir}")
+        if args.name:
+            print(f"  Test:    {args.name}")
         print(f"  Reconnect: auto (unlimited)")
         print(f"{'='*50}")
         print(f"Press Ctrl+C to stop\n")
 
         record_camera(url, cam_name, out_dir)
     else:
-        # Multi-camera: each in a process
+        # Multi-camera: each in a process, all files in same directory
         import multiprocessing
+        out_dir = out_base  # all cameras save to same dir
+        os.makedirs(out_dir, exist_ok=True)
+
+        print(f"{'='*50}")
+        print(f"  RTSP RECORDER — {len(args.camera)} cameras")
+        if args.name:
+            print(f"  Test:    {args.name}")
+        print(f"  Output:  {out_dir}")
+        print(f"  Mode:    -c copy (zero CPU)")
+        print(f"{'='*50}")
+
         processes = []
         for cam_name in args.camera:
             cam = next((c for c in cameras if c["name"] == cam_name), None)
@@ -216,7 +274,6 @@ def main():
                 continue
 
             url = make_rtsp_url(cred, cam)
-            out_dir = os.path.join(out_base, f"{cam_name}_{session_ts}")
 
             p = multiprocessing.Process(
                 target=record_camera,
@@ -225,9 +282,9 @@ def main():
             )
             p.start()
             processes.append(p)
-            print(f"Started: {cam_name} -> {out_dir}")
+            print(f"  {cam_name} ({cam['ip']})")
 
-        print(f"\nRecording {len(processes)} cameras. Press Ctrl+C to stop all.\n")
+        print(f"\nPress Ctrl+C to stop\n")
 
         try:
             for p in processes:
@@ -238,7 +295,14 @@ def main():
                 p.terminate()
             for p in processes:
                 p.join(timeout=5)
-            print("All recordings saved.")
+
+        # Auto-remux all recorded files (fragmented MP4 -> proper MP4)
+        print(f"\nRemuxing videos...")
+        import glob
+        for mp4 in sorted(glob.glob(os.path.join(out_dir, "*.mp4"))):
+            if "_fixed" not in mp4:
+                remux_fragmented(mp4)
+        print("Done.")
 
 
 if __name__ == "__main__":

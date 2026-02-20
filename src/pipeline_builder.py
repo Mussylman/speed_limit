@@ -39,16 +39,14 @@ def apply_quality_preset(cfg: dict, quality: str):
 
     # No frame drops: wait instead of dropping
     cfg["_no_drop"] = True
-    cfg["_prefetch_size"] = 64
+    cfg["_prefetch_size"] = 16
 
     # OCR: full resolution crops (no resize), all scales
     cfg["_max_crop_width"] = 0  # 0 = no resize
     cfg["_ocr_max_scales"] = 6  # all scales + plate-zoom
 
-    # Speed: wider smoothing window
-    hom = cfg.get("homography", {})
-    hom["smoothing_window"] = 20
-    cfg["homography"] = hom
+    # Speed: keep default smoothing window (wider window accumulates
+    # tracker jitter as distance when every frame is processed)
 
 
 def create_shared_nomeroff_pipeline(config: dict):
@@ -74,12 +72,60 @@ def create_shared_nomeroff_pipeline(config: dict):
     return p
 
 
-def create_yolo(config: dict, gpu_lock=None):
+def create_shared_yolo(config: dict):
+    """Create a single YOLO model wrapped in SharedAsyncYOLO for multi-camera use.
+
+    Returns (shared_yolo, use_half, yolo_imgsz).
+    Camera threads call create_yolo(shared_yolo=...) to get a CameraYOLOProxy.
+    """
+    import torch
+    from ultralytics import YOLO
+    from shared_yolo import SharedAsyncYOLO
+
+    yolo_path = os.path.join(BASE_DIR, config["models"]["yolo_model"])
+    model = YOLO(yolo_path, task="detect")
+
+    device = config.get("device", "cuda")
+    try:
+        model.to(device)
+    except Exception:
+        device = "cpu"
+
+    use_half = device == "cuda" and torch.cuda.is_available()
+    yolo_imgsz = int(config.get("yolo_imgsz", 1280))
+
+    shared = SharedAsyncYOLO(
+        model=model,
+        imgsz=yolo_imgsz,
+        classes=[2],
+        half=use_half,
+        tracker="bytetrack.yaml",
+        max_queue_per_camera=int(config.get("_yolo_max_queue", 3)),
+        min_conf=float(config.get("_yolo_min_conf", 0.5)),
+        max_detect_size=int(config.get("_yolo_max_detect_size", 0)),
+    )
+
+    print(f"SharedYOLO: 1 model, imgsz={yolo_imgsz}, half={use_half}")
+    return shared, use_half, yolo_imgsz
+
+
+def create_yolo(config: dict, gpu_lock=None, shared_yolo=None, camera_id=None):
     """Create YOLO model + AsyncYOLO wrapper.
 
+    If shared_yolo is provided, returns a CameraYOLOProxy instead of AsyncYOLO.
     Returns (async_yolo, use_half, yolo_imgsz).
     """
     import torch
+
+    use_half = config.get("device", "cuda") == "cuda" and torch.cuda.is_available()
+    yolo_imgsz = int(config.get("yolo_imgsz", 1280))
+
+    if shared_yolo is not None:
+        from shared_yolo import CameraYOLOProxy
+        proxy = CameraYOLOProxy(shared_yolo, camera_id)
+        return proxy, use_half, yolo_imgsz
+
+    # Single-camera path: load own model + AsyncYOLO (no regression)
     from ultralytics import YOLO
     from async_yolo import AsyncYOLO
 
@@ -93,7 +139,6 @@ def create_yolo(config: dict, gpu_lock=None):
         device = "cpu"
 
     use_half = device == "cuda" and torch.cuda.is_available()
-    yolo_imgsz = int(config.get("yolo_imgsz", 1280))
 
     async_yolo = AsyncYOLO(
         model=model,
@@ -111,9 +156,17 @@ def create_yolo(config: dict, gpu_lock=None):
 
 
 def _get_camera_settings(cam_config: dict, camera_id: str) -> dict:
-    """Get per-camera settings from config_cam.yaml by camera name."""
+    """Get per-camera settings from config_cam.yaml by camera name.
+    Supports both exact match and prefix match (e.g. video file
+    'Camera_12_2026-02-18_11-56-38' matches config name 'Camera_12').
+    """
     for cam in cam_config.get("cameras", []):
         if cam.get("name") == camera_id:
+            return cam
+    # Prefix match: video filename starts with camera name
+    for cam in cam_config.get("cameras", []):
+        name = cam.get("name", "")
+        if name and camera_id.startswith(name + "_"):
             return cam
     return {}
 
@@ -232,13 +285,18 @@ def create_ocr(config: dict, camera_id: str, output_dir: str, cam_config: dict =
         min_brightness=float(config.get("_min_brightness", 20.0)),
         max_brightness=float(config.get("_max_brightness", 240.0)),
         quality_improvement=float(config.get("_quality_improvement", 1.0)),
-        min_confirmations=int(config.get("_min_confirmations", 2)),
+        min_confirmations=int(_get("min_confirmations", config.get("_min_confirmations", 2))),
         shared_pipeline=shared_pipeline,
         nomeroff_lock=nomeroff_lock,
         ocr_max_scales=int(config.get("_ocr_max_scales", 6)),
+        plate_stretch_x=float(_get("plate_stretch_x", 1.0)),
     )
 
     max_crop_w = int(config.get("_max_crop_width", 640))
+
+    # Per-camera max_upgrades overrides global
+    global_max_upgrades = int(config.get("_max_upgrades", 6))
+    cam_max_upgrades = int(cam_settings.get("max_upgrades", global_max_upgrades))
 
     async_ocr = AsyncOCR(
         recognizer,
@@ -248,6 +306,7 @@ def create_ocr(config: dict, camera_id: str, output_dir: str, cam_config: dict =
         good_conf_threshold=float(config.get("_ocr_good_conf", 0.88)),
         cache_max_size=200,
         cache_ttl_frames=300,
+        max_upgrades=cam_max_upgrades,
     )
 
     return recognizer, async_ocr

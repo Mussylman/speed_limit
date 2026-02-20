@@ -65,6 +65,9 @@ class PlateEvent:
     # Пути к изображениям
     crop_path: str = ""
 
+    # Text confidence (формат + длина + структура, 0-1)
+    text_conf: float = 0.0
+
     # Причина отклонения (для failed)
     reject_reason: str = ""
 
@@ -123,6 +126,7 @@ class PlateRecognizer:
         shared_pipeline=None,
         nomeroff_lock=None,
         ocr_max_scales: int = 6,
+        plate_stretch_x: float = 1.0,
     ):
         self.output_dir = output_dir
         self.camera_id = camera_id
@@ -152,9 +156,26 @@ class PlateRecognizer:
         self.res_ocr_dir = os.path.join(output_dir, "res_ocr")
         os.makedirs(self.res_ocr_dir, exist_ok=True)
 
+        # Debug OCR: save ALL pipeline inputs/outputs into subfolders
+        self.debug_dir = os.path.join(output_dir, "debug_ocr")
+        self.debug_car_crops = os.path.join(self.debug_dir, "car_crops")
+        self.debug_plate_bbox = os.path.join(self.debug_dir, "plate_bbox")
+        self.debug_plate_crops = os.path.join(self.debug_dir, "plate_crops")
+        self.debug_no_plate = os.path.join(self.debug_dir, "no_plate")
+        self.debug_small_plate = os.path.join(self.debug_dir, "small_plate")
+        self.debug_rejected = os.path.join(self.debug_dir, "rejected")
+        for d in [self.debug_car_crops, self.debug_plate_bbox,
+                  self.debug_plate_crops, self.debug_no_plate,
+                  self.debug_small_plate, self.debug_rejected]:
+            os.makedirs(d, exist_ok=True)
+        self._debug_idx = 0
+        self._dbg_track = 0
+        self._dbg_frame = 0
+
         # NomeroffNet: use shared pipeline if provided, else load own
         self.nomeroff_lock = nomeroff_lock
         self.ocr_max_scales = ocr_max_scales
+        self.plate_stretch_x = plate_stretch_x
         if shared_pipeline is not None:
             self.pipeline = shared_pipeline
             print(f"NomeroffNet: using shared pipeline (max_scales={ocr_max_scales})")
@@ -171,6 +192,11 @@ class PlateRecognizer:
 
         # Для 1080p кропы машин ≤960px — resize не нужен
         self.max_ocr_width = 0  # 0 = no resize
+
+        # Глобальный реестр подтверждённых номеров (shared across cameras)
+        # Позволяет match_plate_fuzzy исправлять A↔Z и др. OCR-путаницы
+        if not hasattr(PlateRecognizer, '_known_plates'):
+            PlateRecognizer._known_plates = set()
 
         # Лучшие результаты
         self.passed_results: Dict[int, PlateEvent] = {}  # прошли все фильтры
@@ -289,24 +315,20 @@ class PlateRecognizer:
         return True, ""
 
     def _fuzzy_vote(self, track_id: int, text: str) -> Tuple[str, int]:
-        """Fuzzy голосование: тексты с расстоянием ≤1 считаются одинаковыми.
+        """Голосование: только exact match считается тем же номером.
+
+        Fuzzy merge (distance≤1) отключён — он приводил к тому, что
+        первое неправильное чтение (напр. 975ZCM01) поглощало
+        последующие правильные (975ZCK01), не давая Upgrade логике
+        в async_ocr заменить результат.
 
         Returns: (best_text, total_votes)
         """
         votes = self.text_votes[track_id]
-        # Найти существующий текст с расстоянием ≤ 1
-        for existing_text in votes:
-            if levenshtein_distance(text, existing_text) <= 1:
-                # Голосуем за тот вариант, который длиннее или чаще
-                if votes[existing_text] >= votes.get(text, 0):
-                    votes[existing_text] += 1
-                    return existing_text, votes[existing_text]
-                else:
-                    # Новый вариант лучше — переносим голоса
-                    votes[text] = votes.pop(existing_text) + 1
-                    return text, votes[text]
-        # Новый текст
-        votes[text] += 1
+        if text in votes:
+            votes[text] += 1
+        else:
+            votes[text] = 1
         return text, votes[text]
 
     def _compute_ocr_confidence(self, text: str) -> float:
@@ -325,10 +347,15 @@ class PlateRecognizer:
                 score += 0.4
         else:
             score += 0.2  # нет regex = нейтрально
-        # Структура символов (KZ: 3 цифры + 3 буквы + 2 цифры)
-        if len(text) >= 8:
+        # Структура символов (KZ: 3 цифры + 2-3 буквы + 2 цифры)
+        if len(text) == 8:
             d_ok = all(c.isdigit() for c in text[:3]) and all(c.isdigit() for c in text[6:8])
             l_ok = all(c.isalpha() for c in text[3:6])
+            if d_ok and l_ok:
+                score += 0.2
+        elif len(text) == 7:
+            d_ok = all(c.isdigit() for c in text[:3]) and all(c.isdigit() for c in text[5:7])
+            l_ok = all(c.isalpha() for c in text[3:5])
             if d_ok and l_ok:
                 score += 0.2
         return min(1.0, score)
@@ -373,8 +400,8 @@ class PlateRecognizer:
         plate_score = (blur_norm * 0.4 + bright_norm * 0.2 + size_norm * 0.4)
 
         # === 3. OCR SCORE: качество распознанного текста ===
-        # Длина текста: 8 символов = идеально
-        if text_len >= 8:
+        # Длина текста: 7-8 символов = идеально (KZ формат)
+        if text_len >= 7:
             len_norm = 1.0
         elif text_len >= 6:
             len_norm = 0.7
@@ -434,6 +461,12 @@ class PlateRecognizer:
         regions = data[5] if len(data) > 5 else []
 
         if not bboxs or len(bboxs) == 0:
+            self._debug_idx += 1
+            dbg = car_crop.copy()
+            cv2.putText(dbg, "NO PLATE FOUND", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+            cv2.imwrite(os.path.join(self.debug_no_plate,
+                f"{self._debug_idx:05d}_f{self._dbg_frame}_t{self._dbg_track}_s{scale:.1f}.jpg"), dbg)
             return None
 
         bbox = bboxs[0]
@@ -444,6 +477,13 @@ class PlateRecognizer:
         plate_conf = float(bbox[4]) if len(bbox) > 4 else 0.5
 
         if plate_width < self.min_plate_width or plate_height < self.min_plate_height:
+            self._debug_idx += 1
+            dbg = car_crop.copy()
+            cv2.rectangle(dbg, (int(x1), int(y1)), (int(x2), int(y2)), (0, 165, 255), 2)
+            cv2.putText(dbg, f"PLATE SMALL {plate_width}x{plate_height}",
+                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
+            cv2.imwrite(os.path.join(self.debug_small_plate,
+                f"{self._debug_idx:05d}_f{self._dbg_frame}_t{self._dbg_track}_s{scale:.1f}_{plate_width}x{plate_height}.jpg"), dbg)
             return None
 
         text = texts[0] if texts and len(texts) > 0 else ""
@@ -457,9 +497,36 @@ class PlateRecognizer:
             raw = ocr_confs[0]
             if isinstance(raw, (list, tuple, np.ndarray)):
                 vals = [float(v) for v in raw if float(v) >= 0]
-                ocr_conf = min(vals) if vals else 0.0
+                ocr_conf = min(vals) ** 2 if vals else 0.0
             elif isinstance(raw, (int, float)) and float(raw) >= 0:
                 ocr_conf = float(raw)
+
+        # Debug: draw bbox on ORIGINAL crop (not upscaled 800px)
+        self._debug_idx += 1
+        _name = f"{self._debug_idx:05d}_f{self._dbg_frame}_t{self._dbg_track}_s{scale:.1f}_{text}"
+        _orig = getattr(self, '_dbg_orig_crop', None)
+        if _orig is not None:
+            # Пересчитываем bbox координаты из 800px → оригинал
+            _oh, _ow = _orig.shape[:2]
+            _ch, _cw = car_crop.shape[:2]
+            _sx, _sy = _ow / max(1, _cw), _oh / max(1, _ch)
+            dbg = _orig.copy()
+            _bx1, _by1 = int(x1 * _sx), int(y1 * _sy)
+            _bx2, _by2 = int(x2 * _sx), int(y2 * _sy)
+        else:
+            dbg = car_crop.copy()
+            _bx1, _by1 = int(x1), int(y1)
+            _bx2, _by2 = int(x2), int(y2)
+        cv2.rectangle(dbg, (_bx1, _by1), (_bx2, _by2), (0, 255, 0), 2)
+        cv2.putText(dbg, f"{text} ({ocr_conf:.2f})",
+                    (_bx1, _by1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        cv2.imwrite(os.path.join(self.debug_plate_bbox, f"{_name}.jpg"), dbg)
+        # Plate crop тоже из оригинала
+        _px1, _py1 = max(0, _bx1), max(0, _by1)
+        _px2, _py2 = min(dbg.shape[1], _bx2), min(dbg.shape[0], _by2)
+        if _py2 > _py1 and _px2 > _px1:
+            cv2.imwrite(os.path.join(self.debug_plate_crops, f"{_name}.jpg"),
+                        dbg[_py1:_py2, _px1:_px2])
 
         result = (text, plate_conf, ocr_conf, plate_width, plate_height, region)
         if return_bbox:
@@ -511,68 +578,144 @@ class PlateRecognizer:
         return (text2, plate_conf, r2[2], pw, ph, region)
 
     def _correct_from_history(self, track_id: int, text: str) -> str:
-        """Use char_history to correct confusable letters.
+        """Majority vote correction using char_history.
 
-        Uses _OCR_PREFER table: if at a letter position we've seen both
-        char X and char Y, and (X,Y) has a known preferred direction,
-        pick the preferred one — but only if the alternative was seen
-        at least 2 times (to filter single-read noise).
+        At each position, picks the character that was seen most often
+        across all OCR readings for this track. This fixes consistent
+        OCR errors like B→R or K→M by leveraging the fact that the
+        correct character appears on SOME frames.
 
-        When multiple alternatives match, picks the one with the
-        highest vote count.
+        Digit positions: only digits allowed.
+        Letter positions: only letters allowed.
+        Result must pass format regex.
         """
-        if len(text) != 8 or track_id not in self.char_history:
+        if len(text) not in (7, 8) or track_id not in self.char_history:
             return text
 
         chars = list(text)
         history = self.char_history[track_id]
         changed = False
 
-        # Only correct letter positions (3, 4, 5)
-        for i in [3, 4, 5]:
+        # Digit positions: 0-2 and last 2
+        digit_positions = list(range(3)) + list(range(len(text) - 2, len(text)))
+        # Letter positions: 3-5 for 8-char, 3-4 for 7-char
+        letter_positions = list(range(3, len(text) - 2))
+
+        for i in digit_positions:
             if i not in history:
                 continue
-            current = chars[i]
-            if not current.isalpha():
+            # Find most-seen digit at this position
+            best_char = None
+            best_count = 0
+            for ch, cnt in history[i].items():
+                if ch.isdigit() and cnt > best_count:
+                    best_char = ch
+                    best_count = cnt
+            if best_char and best_char != chars[i] and best_count >= 2:
+                chars[i] = best_char
+                changed = True
+
+        for i in letter_positions:
+            if i not in history:
                 continue
-
-            # Collect all valid preferred alternatives with their vote counts
-            best_alt = None
-            best_alt_count = 0
-
-            for alt_char, alt_count in history[i].items():
-                if alt_char == current or not alt_char.isalpha():
-                    continue
-                # Must have been seen at least 2 times to filter noise
-                if alt_count < 2:
-                    continue
-                # Check _OCR_PREFER for this pair (both directions)
-                preferred = OCR_PREFER.get((current, alt_char))
-                if preferred is None:
-                    preferred = OCR_PREFER.get((alt_char, current))
-                if preferred and preferred != current and alt_count > best_alt_count:
-                    best_alt = preferred
-                    best_alt_count = alt_count
-
-            if best_alt:
-                test_chars = chars.copy()
-                test_chars[i] = best_alt
-                test_text = ''.join(test_chars)
-                if self.plate_format_regex and re.match(self.plate_format_regex, test_text):
-                    chars[i] = best_alt
-                    changed = True
+            # Find most-seen letter at this position
+            best_char = None
+            best_count = 0
+            for ch, cnt in history[i].items():
+                if ch.isalpha() and cnt > best_count:
+                    best_char = ch
+                    best_count = cnt
+            if best_char and best_char != chars[i] and best_count >= 2:
+                chars[i] = best_char
+                changed = True
 
         result = ''.join(chars)
+        # Only apply if result passes format regex
         if changed and result != text:
-            print(f"  [char_history] {text} -> {result} (cross-read correction)")
+            if self.plate_format_regex and not re.match(self.plate_format_regex, result):
+                return text  # revert if format broken
+            print(f"  [majority] {text} -> {result}")
         return result
 
-    def _detect_plate(self, car_crop: np.ndarray) -> Optional[Tuple[str, float, float, int, int, str]]:
+    def _smart_plate_reocr(
+        self,
+        car_crop_800: np.ndarray,
+        orig_crop: np.ndarray,
+        bx1: int, by1: int, bx2: int, by2: int,
+        target_height: int = 128,
+    ) -> Optional[Tuple[str, float, float, int, int, str]]:
+        """Extract plate from original hi-res crop using bbox from 800px detection,
+        resize to target_height preserving aspect ratio, stretch horizontally
+        by plate_stretch_x, then re-run OCR.
+
+        Returns (text, plate_conf, ocr_conf, orig_pw, orig_ph, region) or None.
+        """
+        oh, ow = orig_crop.shape[:2]
+        ch, cw = car_crop_800.shape[:2]
+        sx = ow / max(1, cw)
+        sy = oh / max(1, ch)
+
+        # Map bbox from 800px → original coordinates
+        ox1 = int(bx1 * sx)
+        oy1 = int(by1 * sy)
+        ox2 = int(bx2 * sx)
+        oy2 = int(by2 * sy)
+
+        orig_pw = ox2 - ox1
+        orig_ph = oy2 - oy1
+
+        # Padding: 30% horizontal, 100% vertical
+        pad_x = int(orig_pw * 0.3)
+        pad_y = int(orig_ph * 1.0)
+        rx1 = max(0, ox1 - pad_x)
+        ry1 = max(0, oy1 - pad_y)
+        rx2 = min(ow, ox2 + pad_x)
+        ry2 = min(oh, oy2 + pad_y)
+
+        plate_region = orig_crop[ry1:ry2, rx1:rx2]
+        if plate_region.size == 0:
+            return None
+
+        pr_h, pr_w = plate_region.shape[:2]
+        if pr_h < 5 or pr_w < 10:
+            return None
+
+        # Resize to target_height preserving aspect ratio
+        scale = target_height / pr_h
+        new_w = int(pr_w * scale * self.plate_stretch_x)
+        new_h = target_height
+        rectified = cv2.resize(plate_region, (new_w, new_h),
+                               interpolation=cv2.INTER_LANCZOS4)
+
+        # Light blur to remove pixel staircase artifacts from stretch
+        if self.plate_stretch_x > 1.05:
+            rectified = cv2.GaussianBlur(rectified, (3, 3), 0)
+
+        # Debug: save rectified plate
+        self._debug_idx += 1
+        _name = f"{self._debug_idx:05d}_f{self._dbg_frame}_t{self._dbg_track}_smart"
+        cv2.imwrite(os.path.join(self.debug_plate_bbox, f"{_name}_rectified.jpg"), rectified)
+
+        # Re-run OCR on rectified plate
+        r = self._run_pipeline_once(rectified, 1.0)
+        if r is None:
+            return None
+
+        text = r[0]
+        text = fix_kz_plate(text)
+        return (text, r[1], r[2], orig_pw, orig_ph, r[5])
+
+    def _detect_plate(self, car_crop: np.ndarray,
+                      orig_crop: np.ndarray = None,
+                      ) -> Optional[Tuple[str, float, float, int, int, str]]:
         """
         Распознаёт номер через NomeroffNet.
 
-        For small crops (width < 640), runs OCR at multiple scales
-        and merges results via per-character majority voting.
+        Один upscale до 800px → один вызов YOLO+OCR.
+        Если номер не найден на 800px — его там нет.
+        Если OCR уверен (>=0.8) — возвращаем сразу (1 вызов).
+        Если есть orig_crop — smart plate reocr (2 вызова total).
+        Иначе — plate-zoom fallback (3 вызова total).
 
         Returns: (text, plate_conf, ocr_conf, plate_width, plate_height, region) или None
         """
@@ -580,107 +723,63 @@ class PlateRecognizer:
             return None
 
         try:
-            h, w = car_crop.shape[:2]
+            # Кроп уже pre-resized до 800px в main.py — один вызов pipeline
+            result = self._run_pipeline_once(car_crop, 1.0, return_bbox=True)
 
-            # Downscale large crops if limit is set
-            if self.max_ocr_width > 0 and w > self.max_ocr_width:
-                scale = self.max_ocr_width / w
-                crop = cv2.resize(car_crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
-                return self._run_pipeline_once(crop, scale)
-
-            # For small crops: multi-scale OCR with character-level voting
-            # ocr_max_scales limits pipeline calls (2=fast live, 6=full offline)
-            if w < 960:
-                results = []
-                n_calls = 0
-                max_calls = self.ocr_max_scales
-                # Scale 1: original
-                r = self._run_pipeline_once(car_crop, 1.0)
-                n_calls += 1
-                if r:
-                    results.append(r)
-                # Scale 2: upscale to 480px (skip if already bigger)
-                if n_calls < max_calls and w < 480:
-                    s2 = 480 / w
-                    crop2 = cv2.resize(car_crop, None, fx=s2, fy=s2, interpolation=cv2.INTER_LANCZOS4)
-                    r = self._run_pipeline_once(crop2, s2)
-                    n_calls += 1
-                    if r:
-                        results.append(r)
-                # Scale 3: upscale to 640px (skip if already bigger)
-                if n_calls < max_calls and w < 640:
-                    s3 = 640 / w
-                    crop3 = cv2.resize(car_crop, None, fx=s3, fy=s3, interpolation=cv2.INTER_LANCZOS4)
-                    r = self._run_pipeline_once(crop3, s3)
-                    n_calls += 1
-                    if r:
-                        results.append(r)
-                # Scale 4: upscale to 800px
-                if n_calls < max_calls and w < 800:
-                    s4 = 800 / w
-                    crop4 = cv2.resize(car_crop, None, fx=s4, fy=s4, interpolation=cv2.INTER_LANCZOS4)
-                    r = self._run_pipeline_once(crop4, s4)
-                    n_calls += 1
-                    if r:
-                        results.append(r)
-                # Scale 5: upscale to 960px
-                if n_calls < max_calls and w < 960:
-                    s5 = 960 / w
-                    crop5 = cv2.resize(car_crop, None, fx=s5, fy=s5, interpolation=cv2.INTER_LANCZOS4)
-                    r = self._run_pipeline_once(crop5, s5)
-                    n_calls += 1
-                    if r:
-                        results.append(r)
-
-                # Plate-zoom: detect plate bbox, extract & zoom, re-OCR
-                if n_calls < max_calls:
-                    zoom_r = self._reocr_plate_zoom(car_crop, target_plate_width=400)
-                    if zoom_r:
-                        results.append(zoom_r)
-
-                if not results:
-                    self.stats["skipped_plate_size"] += 1
-                    return None
-
-                # Single result — return as-is
-                if len(results) == 1:
-                    return results[0]
-
-                # Multiple results: merge texts that are 8 chars (KZ format)
-                kz_results = [r for r in results if len(r[0]) == 8]
-                if len(kz_results) >= 2:
-                    texts = [r[0] for r in kz_results]
-                    merged_text = merge_texts_charwise(texts)
-                    merged_text = fix_kz_plate(merged_text)
-                    # Use metadata from highest plate_conf result
-                    best_r = max(kz_results, key=lambda r: r[1])
-                    return (merged_text, best_r[1], best_r[2], best_r[3], best_r[4], best_r[5])
-
-                # Fallback: return highest plate_conf result
-                return max(results, key=lambda r: r[1])
-
-            # Normal size crop: also try plate-zoom if scales allow
-            results = []
-            r = self._run_pipeline_once(car_crop, 1.0)
-            if r:
-                results.append(r)
-            if self.ocr_max_scales >= 2:
-                zoom_r = self._reocr_plate_zoom(car_crop, target_plate_width=400)
-                if zoom_r:
-                    results.append(zoom_r)
-            if not results:
+            if result is None:
+                self.stats["skipped_plate_size"] += 1
                 return None
-            if len(results) == 1:
-                return results[0]
-            # Merge if both are 8 chars
-            kz_results = [r for r in results if len(r[0]) == 8]
-            if len(kz_results) >= 2:
-                texts = [r[0] for r in kz_results]
-                merged = merge_texts_charwise(texts)
+
+            if len(result) >= 10:
+                text, plate_conf, ocr_conf, pw, ph, region, bx1, by1, bx2, by2 = result
+            else:
+                text, plate_conf, ocr_conf, pw, ph, region = result
+                bx1 = by1 = bx2 = by2 = 0
+
+            base_result = (text, plate_conf, ocr_conf, pw, ph, region)
+
+            # Если OCR уверен — возвращаем сразу (1 вызов pipeline)
+            if ocr_conf >= 0.8 or self.ocr_max_scales <= 1:
+                return base_result
+
+            # Вызов 2: smart plate reocr (if orig_crop available)
+            if orig_crop is not None and bx2 > bx1 and by2 > by1:
+                smart_r = self._smart_plate_reocr(
+                    car_crop, orig_crop, bx1, by1, bx2, by2)
+                if smart_r:
+                    smart_text = smart_r[0]
+                    base_valid = bool(self.plate_format_regex and
+                                      re.match(self.plate_format_regex, text))
+                    smart_valid = bool(self.plate_format_regex and
+                                       re.match(self.plate_format_regex, smart_text))
+
+                    # Smart valid + base invalid → always trust smart
+                    if smart_valid and not base_valid:
+                        return (smart_text, smart_r[1], smart_r[2], pw, ph, region)
+                    # Both valid, same length → charwise merge
+                    if (len(smart_text) == len(text) and len(text) in (7, 8)):
+                        merged = merge_texts_charwise([text, smart_text])
+                        merged = fix_kz_plate(merged)
+                        best_conf = max(ocr_conf, smart_r[2])
+                        best_plate = max(plate_conf, smart_r[1])
+                        return (merged, best_plate, best_conf, pw, ph, region)
+                    elif smart_r[2] > ocr_conf:
+                        return (smart_text, smart_r[1], smart_r[2], pw, ph, region)
+                return base_result
+
+            # Fallback: plate-zoom (no orig_crop, 2 more calls = 3 total)
+            zoom_r = self._reocr_plate_zoom(car_crop, target_plate_width=400)
+            if zoom_r and len(zoom_r[0]) == len(text) and len(text) in (7, 8):
+                # Merge двух результатов посимвольным голосованием
+                merged = merge_texts_charwise([text, zoom_r[0]])
                 merged = fix_kz_plate(merged)
-                best_r = max(kz_results, key=lambda r: r[1])
-                return (merged, best_r[1], best_r[2], best_r[3], best_r[4], best_r[5])
-            return max(results, key=lambda r: r[1])
+                best_conf = max(ocr_conf, zoom_r[2])
+                best_plate = max(plate_conf, zoom_r[1])
+                return (merged, best_plate, best_conf, pw, ph, region)
+            elif zoom_r and zoom_r[2] > ocr_conf:
+                return zoom_r
+
+            return base_result
 
         except Exception as e:
             print(f"OCR error: {e}")
@@ -695,6 +794,7 @@ class PlateRecognizer:
         bbox: Tuple[int, int, int, int] = None,
         frame_idx: int = 0,
         detection_conf: float = 0.0,
+        orig_crop: np.ndarray = None,
     ) -> Optional[PlateEvent]:
         """
         Обрабатывает кроп машины.
@@ -716,9 +816,21 @@ class PlateRecognizer:
         # === ФИЛЬТР 1: Размер машины (дешёвый) ===
         if car_height > 0 and car_height < self.min_car_height:
             self.stats["skipped_car_size"] += 1
+            self._debug_idx += 1
+            dbg = car_crop.copy()
+            cv2.putText(dbg, f"REJECT: car_h={car_height}<{self.min_car_height}",
+                        (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+            cv2.imwrite(os.path.join(self.debug_rejected,
+                f"{self._debug_idx:05d}_f{frame_idx}_t{track_id}_car_size_{car_width}x{car_height}.jpg"), dbg)
             return self._get_best_result(track_id)
         if car_width > 0 and car_width < self.min_car_width:
             self.stats["skipped_car_size"] += 1
+            self._debug_idx += 1
+            dbg = car_crop.copy()
+            cv2.putText(dbg, f"REJECT: car_w={car_width}<{self.min_car_width}",
+                        (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+            cv2.imwrite(os.path.join(self.debug_rejected,
+                f"{self._debug_idx:05d}_f{frame_idx}_t{track_id}_car_size_{car_width}x{car_height}.jpg"), dbg)
             return self._get_best_result(track_id)
 
         # === ФИЛЬТР 2: Качество кадра (дешёвый, ~0.1мс) ===
@@ -731,6 +843,12 @@ class PlateRecognizer:
         acceptable, reject_reason = self._is_quality_acceptable(blur, brightness)
         if not acceptable:
             self.stats["skipped_quality"] += 1
+            self._debug_idx += 1
+            dbg = car_crop.copy()
+            cv2.putText(dbg, f"REJECT: {reject_reason}",
+                        (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+            cv2.imwrite(os.path.join(self.debug_rejected,
+                f"{self._debug_idx:05d}_f{frame_idx}_t{track_id}_quality_{reject_reason}.jpg"), dbg)
             return self._get_best_result(track_id)
 
         # === ФИЛЬТР 3: Кадр должен быть лучше предыдущего ===
@@ -771,8 +889,12 @@ class PlateRecognizer:
         self.last_ocr_frame[track_id] = frame_idx
         self.stats["ocr_called"] += 1
 
+        # Debug: set context for pipeline saves (car_crop saved in main.py before resize)
+        self._dbg_track = track_id
+        self._dbg_frame = frame_idx
+
         start_time = time.time()
-        plate_info = self._detect_plate(car_crop)
+        plate_info = self._detect_plate(car_crop, orig_crop=orig_crop)
         processing_time = (time.time() - start_time) * 1000
 
         if plate_info is None:
@@ -846,6 +968,7 @@ class PlateRecognizer:
             detection_conf=detection_conf,
             plate_conf=plate_conf,
             ocr_conf=ocr_conf,  # реальная уверенность в тексте
+            text_conf=text_conf,  # формат + длина + структура (0-1)
             processing_time_ms=round(processing_time, 1),
             plate_text=text,
             region=region,
@@ -901,11 +1024,12 @@ class PlateRecognizer:
         # Прошёл все фильтры + подтверждён голосованием!
         self.stats["passed"] += 1
 
-        # Cross-read correction: use rare chars from history (e.g., Z seen once vs A seen many times)
-        corrected_text = self._correct_from_history(track_id, text)
-        if corrected_text != text:
-            text = corrected_text
-            event.plate_text = text
+        # Cross-read correction disabled: majority vote introduces more errors
+        # than it fixes (e.g. 976ABR01 -> 976AB00, 413AZN13 -> 412WN13)
+        # corrected_text = self._correct_from_history(track_id, text)
+        # if corrected_text != text:
+        #     text = corrected_text
+        #     event.plate_text = text
 
         # Используем лучший кроп из pending если он лучше
         pending = self.pending_results.pop(track_id, None)
@@ -913,19 +1037,28 @@ class PlateRecognizer:
             pending.plate_text = text  # apply corrected text
             pending.ocr_conf = ocr_conf
             self._update_passed(track_id, pending)
+            return pending   # return CURRENT reading for async_ocr upgrade comparison
         else:
             self._update_passed(track_id, event)
-
-        return self.passed_results.get(track_id)
+            return event     # return CURRENT reading for async_ocr upgrade comparison
 
     def _update_passed(self, track_id: int, event: PlateEvent):
         """Обновляет лучший passed результат"""
+        # Fuzzy-сверка с уже известными номерами (A↔Z, H↔N и др.)
+        from kz_plate import match_plate_fuzzy
+        corrected = match_plate_fuzzy(event.plate_text, PlateRecognizer._known_plates)
+        if corrected != event.plate_text:
+            print(f"  [FUZZY] {event.plate_text} -> {corrected} (matched known plate)")
+            event.plate_text = corrected
+
         current = self.passed_results.get(track_id)
         if current is None or event.total_score > current.total_score:
             # Копируем кроп только когда сохраняем лучший результат
             if event.crop is not None:
                 event.crop = event.crop.copy()
             self.passed_results[track_id] = event
+            # Регистрируем номер в глобальном реестре
+            PlateRecognizer._known_plates.add(event.plate_text)
             print(f"✓ {event.plate_text} | car:{event.car_score:.2f} plate:{event.plate_score:.2f} ocr:{event.ocr_score:.2f}")
 
             # Сразу сохраняем на диск (переживает Ctrl+C)

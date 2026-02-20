@@ -70,10 +70,14 @@ def draw_results_panel(frame, passed_results, speed_tracker, speed_limit):
 
 
 def process_source(source, cfg, cam_cfg, cross_queue=None, start_time=None,
-                   shared_pipeline=None, nomeroff_lock=None, yolo_lock=None):
+                   shared_pipeline=None, nomeroff_lock=None, shared_yolo=None,
+                   deferred_ocr=False, camera_result=None, exp_dir=None):
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     name = source.info.name
-    out_dir = os.path.join(BASE_DIR, cfg["output_dir"], f"{name}_run_{timestamp}")
+    if exp_dir:
+        out_dir = os.path.join(exp_dir, name)
+    else:
+        out_dir = os.path.join(BASE_DIR, cfg["output_dir"], f"{name}_run_{timestamp}")
     os.makedirs(out_dir, exist_ok=True)
 
     run_start_time = datetime.datetime.now()
@@ -92,7 +96,8 @@ def process_source(source, cfg, cam_cfg, cross_queue=None, start_time=None,
     print(f"Resolution: {source.info.width}x{source.info.height} @ {source.info.fps:.1f} fps")
 
     # --- Pipeline components via builder ---
-    async_yolo, use_half, yolo_imgsz = create_yolo(cfg, gpu_lock=yolo_lock)
+    async_yolo, use_half, yolo_imgsz = create_yolo(cfg, shared_yolo=shared_yolo,
+                                                    camera_id=name)
 
     if use_half:
         print("YOLO: FP16 mode enabled")
@@ -142,31 +147,72 @@ def process_source(source, cfg, cam_cfg, cross_queue=None, start_time=None,
     else:
         print("Speed: LINES")
 
-    recognizer, async_ocr = create_ocr(cfg, name, out_dir, cam_config=cam_cfg,
-                                       shared_pipeline=shared_pipeline,
-                                       nomeroff_lock=nomeroff_lock)
-
-    # Pass video time to OCR for accurate timestamps on cards
-    if video_start_time is not None:
-        recognizer.video_start_time = video_start_time
-        recognizer.video_fps = fps
-
-    # Per-camera settings
+    # Per-camera settings (needed before OCR/collector creation)
     from pipeline_builder import _get_camera_settings
     cam_settings = _get_camera_settings(cam_cfg, name)
-    recognizer.camera_label = cam_settings.get("label", "")
 
-    plate_format = cfg.get("plate_format_regex", "")
-    print(f"OCR: NomeroffNet (ASYNC)")
-    print(f"   Car: >= {recognizer.min_car_height}x{recognizer.min_car_width} px")
-    print(f"   Plate: >= {cfg.get('min_plate_width', 60)}x{cfg.get('min_plate_height', 15)} px")
-    print(f"   Format: {plate_format if plate_format else 'any'}")
-    print(f"   Cooldown: {cfg.get('ocr_cooldown_frames', 3)} frames")
-    print(f"   Min confirmations: {recognizer.min_confirmations}")
+    # Aspect ratio filter: front/rear view only (width/height ~ 0.9-1.4)
+    min_aspect = float(cam_settings.get("min_aspect_ratio", 0.8))
+    max_aspect = float(cam_settings.get("max_aspect_ratio", 1.5))
+    min_crop_area = int(cam_settings.get("min_crop_area", 30000))
+    min_crop_width = int(cam_settings.get("min_crop_width", 350))
+    ocr_resize_width = int(cam_settings.get("ocr_resize_width", 800))
+    cross_time_offset = float(cam_settings.get("cross_time_offset", 0.0))
+    aspect_skipped = 0
+    area_skipped = 0
+    width_skipped = 0
+
+    # Zones: crop_zone (where to collect crops for OCR)
+    crop_zone = None
+    crop_zone_raw = cam_settings.get("crop_zone")
+    if crop_zone_raw:
+        crop_zone = np.array(crop_zone_raw, dtype=np.int32)
+        print(f"Crop zone: {len(crop_zone)} points")
+    detection_zone = None
+    detection_zone_raw = cam_settings.get("detection_zone")
+    if detection_zone_raw:
+        detection_zone = np.array(detection_zone_raw, dtype=np.int32)
+        print(f"Detection zone: {len(detection_zone)} points")
+
+    # OCR or deferred crop collection
+    crop_collector = None
+    recognizer = None
+    async_ocr = None
+    if deferred_ocr:
+        from crop_collector import CropCollector
+        crop_collector = CropCollector(
+            max_per_track=int(cfg.get("max_crops_per_track", 10)),
+            save_dir=out_dir,
+            min_car_height=int(cam_settings.get("min_car_height",
+                                                 cfg.get("min_car_height", 150))),
+            min_car_width=int(cam_settings.get("min_car_width",
+                                                cfg.get("min_car_width", 100))),
+            video_start_time=video_start_time,
+            video_fps=fps,
+        )
+        print(f"OCR: DEFERRED (collecting crops, saving ALL to disk)")
+        print(f"   Car filter: >= {crop_collector.min_car_height}x{crop_collector.min_car_width} px")
+        print(f"   Crops dir: {out_dir}/crops/")
+    else:
+        recognizer, async_ocr = create_ocr(cfg, name, out_dir, cam_config=cam_cfg,
+                                           shared_pipeline=shared_pipeline,
+                                           nomeroff_lock=nomeroff_lock)
+        if video_start_time is not None:
+            recognizer.video_start_time = video_start_time
+            recognizer.video_fps = fps
+        recognizer.camera_label = cam_settings.get("label", "")
+        plate_format = cfg.get("plate_format_regex", "")
+        print(f"OCR: NomeroffNet (ASYNC)")
+        print(f"   Car: >= {recognizer.min_car_height}x{recognizer.min_car_width} px")
+        print(f"   Plate: >= {recognizer.min_plate_width}x{recognizer.min_plate_height} px")
+        print(f"   Format: {plate_format if plate_format else 'any'}")
+        print(f"   Cooldown: {cfg.get('ocr_cooldown_frames', 3)} frames")
+        print(f"   Min confirmations: {recognizer.min_confirmations}")
+        print(f"   Aspect ratio: {min_aspect:.1f} - {max_aspect:.1f}, min width: {min_crop_width}, min area: {min_crop_area}")
 
     # Parameters (per-camera overrides global)
     ocr_conf_threshold = float(cfg.get("ocr_conf_threshold", 0.5))
-    frame_skip = int(cfg.get("frame_skip", 1))
+    frame_skip = int(cam_settings.get("frame_skip", cfg.get("frame_skip", 1)))
     show_window = bool(cfg.get("show_window", True)) and not HEADLESS
     speed_limit = int(cam_settings.get("speed_limit", cfg.get("speed_limit", 70)))
     no_drop = cfg.get("_no_drop", False)
@@ -174,6 +220,10 @@ def process_source(source, cfg, cam_cfg, cross_queue=None, start_time=None,
     detect_sz = cfg.get("_yolo_max_detect_size", 0)
     detect_info = f", detect_resize={detect_sz}p" if detect_sz else ""
     print(f"YOLO: imgsz={yolo_imgsz}, skip={frame_skip}{detect_info}")
+
+    # Motion detection: skip YOLO on static frames
+    from motion_detector import MotionDetector
+    motion = MotionDetector(threshold=5.0, min_area_pct=0.5, warmup_frames=5)
 
     # Speed tracker (domain: per-vehicle max speed, violations, raw stream)
     speed_tracker = SpeedTracker(
@@ -190,11 +240,12 @@ def process_source(source, cfg, cam_cfg, cross_queue=None, start_time=None,
         report_interval=10.0,
         json_log=True,
     )
-    metrics.async_ocr = async_ocr
+    metrics.async_ocr = async_ocr  # None in deferred mode
 
     # File logger
     file_logger = FileLogger(output_dir=out_dir)
-    recognizer.file_logger = file_logger
+    if recognizer:
+        recognizer.file_logger = file_logger
 
     print(f"YOLO: async mode (frame_skip={frame_skip})")
     print("Running... (Q to quit)\n")
@@ -240,6 +291,7 @@ def process_source(source, cfg, cam_cfg, cross_queue=None, start_time=None,
     last_status_time = time.time()
     prev_dropped = 0
     null_frames = 0
+    zone_skipped = 0
 
     try:
       while True:
@@ -290,47 +342,59 @@ def process_source(source, cfg, cam_cfg, cross_queue=None, start_time=None,
             q_cap_val = source.queue_capacity if hasattr(source, 'queue_capacity') else 0
             rc = getattr(source, '_reconnect_count', 0)
 
-            ocr_stats = recognizer.stats
-            ocr_async = async_ocr.get_stats()
             yolo_stats = async_yolo.get_stats()
 
             total_speeds = len(speed_tracker.speeds)
             violations = speed_tracker.stats.get("violations", 0)
-            passed_plates = len(recognizer.passed_results)
-
-            uptime = now_status - display_fps_start if display_fps > 0 else 0
+            passed_plates = len(recognizer.passed_results) if recognizer else 0
 
             print(f"\n{'='*70}")
             print(f"[STREAM] FPS:{display_fps:.1f} decode:{dec_fps_val:.0f} queue:{q_sz_val}/{q_cap_val} "
                   f"drop:{new_drops} null:{null_frames} reconnect:{rc} lat:{latency_ms:.0f}ms(p95:{latency_p95:.0f})")
+            yolo_sub = yolo_stats['submitted']
+            yolo_drop = yolo_stats['dropped']
+            yolo_drop_pct = (yolo_drop / yolo_sub * 100) if yolo_sub > 0 else 0
             yolo_lock_avg = yolo_stats.get('gpu_lock_avg_ms', 0)
             yolo_lock_info = f" lock_wait:{yolo_lock_avg:.0f}ms" if yolo_lock_avg > 0 else ""
-            print(f"[YOLO]   submit:{yolo_stats['submitted']} done:{yolo_stats['processed']} "
-                  f"drop:{yolo_stats['dropped']} time:{last_yolo_time_ms:.0f}ms{yolo_lock_info}")
+            print(f"[YOLO]   submit:{yolo_sub} done:{yolo_stats['processed']} "
+                  f"drop:{yolo_drop}({yolo_drop_pct:.0f}%) time:{last_yolo_time_ms:.0f}ms{yolo_lock_info}")
 
-            ocr_lock_cnt = ocr_stats.get('nomeroff_lock_count', 0)
-            ocr_lock_avg = (ocr_stats['nomeroff_lock_wait_ms'] / ocr_lock_cnt) if ocr_lock_cnt > 0 else 0
-            ocr_lock_info = f" lock_wait:{ocr_lock_avg:.0f}ms" if ocr_lock_avg > 0 else ""
-            print(f"[OCR]    called:{ocr_stats['ocr_called']} no_plate:{ocr_stats['ocr_no_plate']}{ocr_lock_info} "
-                  f"skip: size={ocr_stats['skipped_car_size']} blur={ocr_stats['skipped_quality']} "
-                  f"dup={ocr_stats['skipped_not_better']} cool={ocr_stats['skipped_cooldown']} "
-                  f"fmt={ocr_stats['skipped_format']} chars={ocr_stats['skipped_chars']} "
-                  f"plate_sz={ocr_stats['skipped_plate_size']} "
-                  f"low_conf={ocr_stats['skipped_low_conf']} unconf={ocr_stats['unconfirmed']}")
-            print(f"[OCR-Q]  submit:{ocr_async['submitted']} done:{ocr_async['processed']} "
-                  f"drop: full={ocr_async['dropped_full']} flight={ocr_async['dropped_in_flight']} "
-                  f"good={ocr_async['dropped_good_conf']}")
+            if recognizer:
+                ocr_stats = recognizer.stats
+                ocr_async = async_ocr.get_stats()
+                ocr_lock_cnt = ocr_stats.get('nomeroff_lock_count', 0)
+                ocr_lock_avg = (ocr_stats['nomeroff_lock_wait_ms'] / ocr_lock_cnt) if ocr_lock_cnt > 0 else 0
+                ocr_lock_info = f" lock_wait:{ocr_lock_avg:.0f}ms" if ocr_lock_avg > 0 else ""
+                print(f"[OCR]    called:{ocr_stats['ocr_called']} no_plate:{ocr_stats['ocr_no_plate']}{ocr_lock_info} "
+                      f"skip: size={ocr_stats['skipped_car_size']} blur={ocr_stats['skipped_quality']} "
+                      f"dup={ocr_stats['skipped_not_better']} cool={ocr_stats['skipped_cooldown']} "
+                      f"fmt={ocr_stats['skipped_format']} chars={ocr_stats['skipped_chars']} "
+                      f"plate_sz={ocr_stats['skipped_plate_size']} "
+                      f"low_conf={ocr_stats['skipped_low_conf']} unconf={ocr_stats['unconfirmed']}")
+                print(f"[OCR-Q]  submit:{ocr_async['submitted']} done:{ocr_async['processed']} "
+                      f"upgrades:{ocr_async['upgrades']} "
+                      f"drop: full={ocr_async['dropped_full']} flight={ocr_async['dropped_in_flight']} "
+                      f"max_upg={ocr_async['dropped_max_upgrades']} not_bigger={ocr_async['dropped_not_bigger']}")
+            if crop_collector:
+                print(f"[CROPS]  {crop_collector.stats_str()} zone_skip:{zone_skipped}")
+            print(f"[FILTER] aspect_skip:{aspect_skipped} width_skip:{width_skipped} area_skip:{area_skipped} (ratio:{min_aspect:.1f}-{max_aspect:.1f} w>={min_crop_width} area>={min_crop_area})")
+            print(f"[MOTION] {motion.get_stats_str()}")
             print(f"[RESULT] cars:{total_speeds} plates:{passed_plates} violations:{violations}")
             print(f"{'='*70}")
+
+            # Periodic sync: frequency-voted text -> passed_results
+            if async_ocr and recognizer:
+                async_ocr.sync_to_recognizer(recognizer)
 
             null_frames = 0
             last_status_time = now_status
 
-        # === SUBMIT TO YOLO (async, every Nth frame) ===
+        # === SUBMIT TO YOLO (async, every Nth frame, skip static) ===
         submitted_yolo = False
         if frame_skip <= 1 or frame_idx % frame_skip == 0:
-            async_yolo.submit(frame, frame_idx, blocking=no_drop)
-            submitted_yolo = True
+            if motion.has_motion(frame):
+                async_yolo.submit(frame, frame_idx, blocking=no_drop)
+                submitted_yolo = True
 
         # === GET YOLO RESULTS ===
         # no_drop (quality max): ждём результат синхронно → bbox точно на кадре
@@ -342,7 +406,8 @@ def process_source(source, cfg, cam_cfg, cross_queue=None, start_time=None,
 
             # Store full frame (JPEG) for OCR results with OSD timestamp
             _, jpg_buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
-            recognizer.full_frames[yolo_result.frame_idx] = jpg_buf
+            if recognizer:
+                recognizer.full_frames[yolo_result.frame_idx] = jpg_buf
 
             cached_detections = []
 
@@ -361,6 +426,12 @@ def process_source(source, cfg, cam_cfg, cross_queue=None, start_time=None,
                 x1i, y1i, x2i, y2i = det.box
                 cx = (x1i + x2i) // 2
                 cy = (y1i + y2i) // 2
+                bot_center = (cx, y2i)  # bottom-center for zone checks
+
+                # Detection zone: skip objects entirely outside
+                if detection_zone is not None:
+                    if cv2.pointPolygonTest(detection_zone, (float(bot_center[0]), float(bot_center[1])), False) < 0:
+                        continue
 
                 # Считаем скорость bbox (пикселей/кадр) для экстраполяции
                 prev = track_prev_pos.get(obj_id)
@@ -373,30 +444,90 @@ def process_source(source, cfg, cam_cfg, cross_queue=None, start_time=None,
 
                 speed.process(yolo_result.frame_idx, obj_id, det.cx, det.cy)
 
-                async_ocr.submit(
-                    track_id=obj_id,
-                    crop=det.crop,
-                    car_height=y2i - y1i,
-                    car_width=x2i - x1i,
-                    frame_idx=yolo_result.frame_idx,
-                    detection_conf=det.conf,
-                )
-
-                cached_result = async_ocr.get_cached_result(obj_id)
-                plate_text = cached_result.plate_text if cached_result else ""
-                plate_conf = cached_result.ocr_conf if cached_result else 0.0
-
+                # Speed (computed first — needed for crop collector)
                 current_speed = None
                 if speed_method == "homography":
                     v = speed.get_speed(obj_id)
-                    if v:
+                    if v is not None:
                         current_speed = v
                 else:
                     if hasattr(speed, 'object_speeds') and obj_id in speed.object_speeds:
                         v, _ = speed.object_speeds[obj_id]
                         current_speed = v
 
-                if current_speed:
+                # Crop zone check (for realtime OCR mode)
+                in_crop_zone = True
+                if crop_zone is not None:
+                    check_pts = [
+                        (float(cx), float(y2i)),
+                        (float(x1i), float(y2i)),
+                        (float(x2i), float(y2i)),
+                        (float(cx), float(cy)),
+                    ]
+                    in_crop_zone = any(
+                        cv2.pointPolygonTest(crop_zone, pt, False) >= 0
+                        for pt in check_pts
+                    )
+                    if not in_crop_zone:
+                        zone_skipped += 1
+
+                # OCR or crop collection
+                plate_text = ""
+                plate_conf = 0.0
+                if crop_collector:
+                    # Deferred mode: save ALL crops (disk), zone doesn't filter
+                    crop_collector.submit(
+                        track_id=obj_id,
+                        crop=det.crop,
+                        full_frame_jpg=jpg_buf,
+                        frame_idx=yolo_result.frame_idx,
+                        bbox=det.box,
+                        speed_kmh=current_speed,
+                        detection_conf=det.conf,
+                        car_width=x2i - x1i,
+                        car_height=y2i - y1i,
+                    )
+                elif in_crop_zone:
+                    # Pre-OCR filters: aspect ratio + crop size
+                    car_w = x2i - x1i
+                    car_h = y2i - y1i
+                    aspect = car_w / max(1, car_h)
+                    crop_area = car_w * car_h
+                    if aspect < min_aspect or aspect > max_aspect:
+                        aspect_skipped += 1
+                    elif car_w < min_crop_width:
+                        width_skipped += 1
+                    elif crop_area < min_crop_area:
+                        area_skipped += 1
+                    else:
+                        # Один качественный resize до 800px (предел NomeroffNet)
+                        ocr_crop = det.crop
+                        ch, cw = ocr_crop.shape[:2]
+                        # Debug: сохраняем ОРИГИНАЛЬНЫЙ кроп (до resize)
+                        if recognizer and hasattr(recognizer, 'debug_car_crops'):
+                            recognizer._debug_idx += 1
+                            cv2.imwrite(os.path.join(recognizer.debug_car_crops,
+                                f"{recognizer._debug_idx:05d}_f{yolo_result.frame_idx}_t{obj_id}_orig_{cw}x{ch}.jpg"),
+                                det.crop)
+                            recognizer._dbg_orig_crop = det.crop  # для plate_bbox на оригинале
+                        if ocr_resize_width > 0 and cw < ocr_resize_width:
+                            s = ocr_resize_width / cw
+                            ocr_crop = cv2.resize(ocr_crop, None, fx=s, fy=s,
+                                                  interpolation=cv2.INTER_LANCZOS4)
+                        async_ocr.submit(
+                            track_id=obj_id,
+                            crop=ocr_crop,
+                            car_height=car_h,
+                            car_width=car_w,
+                            frame_idx=yolo_result.frame_idx,
+                            detection_conf=det.conf,
+                            orig_crop=det.crop,
+                        )
+                    cached_result = async_ocr.get_cached_result(obj_id)
+                    plate_text = cached_result.plate_text if cached_result else ""
+                    plate_conf = cached_result.ocr_conf if cached_result else 0.0
+
+                if current_speed is not None:
                     is_violation = current_speed > speed_limit
                     speed_tracker.update(
                         track_id=obj_id,
@@ -422,16 +553,17 @@ def process_source(source, cfg, cam_cfg, cross_queue=None, start_time=None,
                 frame_idx=yolo_result.frame_idx,
                 fps=metrics.current_fps,
                 yolo_ms=yolo_result.processing_time_ms,
-                ocr_queue=async_ocr.queue_size(),
+                ocr_queue=async_ocr.queue_size() if async_ocr else 0,
                 yolo_queue=async_yolo.input_queue.qsize(),
                 cars_count=len(detections),
             )
 
-            metrics.update_skip_reasons(recognizer.stats)
+            if recognizer:
+                metrics.update_skip_reasons(recognizer.stats)
             metrics.end_frame()
 
         # === GET OCR RESULTS ===
-        for ocr_result in async_ocr.get_results(current_frame_idx=frame_idx):
+        for ocr_result in (async_ocr.get_results(current_frame_idx=frame_idx) if async_ocr else []):
             if ocr_result.blur_score > 0:
                 metrics.log_quality(ocr_result.blur_score, ocr_result.brightness_score)
             if ocr_result.result and ocr_result.result.plate_text:
@@ -448,7 +580,7 @@ def process_source(source, cfg, cam_cfg, cross_queue=None, start_time=None,
                         cross_queue.put_nowait({
                             "camera_id": name,
                             "plate_text": ocr_result.result.plate_text,
-                            "timestamp": time.time(),
+                            "timestamp": time.time() + cross_time_offset,
                             "frame_idx": ocr_result.frame_idx,
                         })
                         cross_emitted.add(ocr_result.track_id)
@@ -502,7 +634,7 @@ def process_source(source, cfg, cam_cfg, cross_queue=None, start_time=None,
                             cv2.FONT_HERSHEY_SIMPLEX, 0.8, c, 2)
 
         # --- Overlays for recording (always) ---
-        if recognizer.passed_results:
+        if recognizer and recognizer.passed_results:
             raw_frame = draw_results_panel(
                 raw_frame, recognizer.passed_results,
                 speed_tracker, speed_limit
@@ -530,7 +662,7 @@ def process_source(source, cfg, cam_cfg, cross_queue=None, start_time=None,
 
         # Passed rate (live)
         total_v = len(speed_tracker.speeds)
-        passed_v = len(recognizer.passed_results)
+        passed_v = len(recognizer.passed_results) if recognizer else 0
         passed_pct = (passed_v / total_v * 100) if total_v > 0 else 0
         pct_color = (0, 255, 0) if passed_pct > 50 else (0, 200, 255) if passed_pct > 20 else (0, 0, 255)
         cv2.putText(raw_frame, f"Passed: {passed_v}/{total_v} ({passed_pct:.0f}%)", (mx, 101),
@@ -567,39 +699,59 @@ def process_source(source, cfg, cam_cfg, cross_queue=None, start_time=None,
         print(f"Video saved: {video_out_path}")
 
     async_yolo.stop()
-    async_ocr.stop()
 
     print("\n")
     yolo_stats = async_yolo.get_stats()
-    print(f"YOLO: submitted={yolo_stats['submitted']}, processed={yolo_stats['processed']}, dropped={yolo_stats['dropped']}")
-    async_ocr.print_stats()
-    recognizer.finalize()
-    speed_tracker.finalize()
-    metrics.finalize()
+    ys, yd = yolo_stats['submitted'], yolo_stats['dropped']
+    yd_pct = (yd / ys * 100) if ys > 0 else 0
+    print(f"YOLO: submitted={ys}, processed={yolo_stats['processed']}, dropped={yd} ({yd_pct:.1f}%)")
 
-    # --- Client report ---
-    duration_sec = time.time() - run_start_epoch
-    coords = cfg.get("coordinates")
-    coords = tuple(coords) if coords else None
-    report_gen = ReportGenerator(out_dir, name, speed_limit,
-                                     address=cfg.get("address", ""),
-                                     coordinates=coords)
-    vid_path = video_out_path if video_writer is not None else None
-    report_gen.generate(
-        passed_results=recognizer.passed_results,
-        speed_tracker=speed_tracker,
-        video_path=vid_path,
-        start_time=run_start_time,
-        duration_sec=duration_sec,
-    )
+    if deferred_ocr:
+        # Deferred mode: return data for post-processing (OCR runs after all cameras)
+        print(f"Crops: {crop_collector.stats_str()} zone_skip:{zone_skipped}")
+        metrics.finalize()
+        if camera_result is not None:
+            camera_result.update({
+                'collector': crop_collector,
+                'speed_tracker': speed_tracker,
+                'out_dir': out_dir,
+                'run_start_time': run_start_time,
+                'duration_sec': time.time() - run_start_epoch,
+                'video_out_path': video_out_path if video_writer is not None else None,
+            })
+        print(f"Done (live): {name}")
+    else:
+        async_ocr.stop()
+        async_ocr.print_stats()
+        # Sync frequency-voted winners back to plate_recognizer before saving
+        async_ocr.sync_to_recognizer(recognizer, final=True)
+        recognizer.finalize()
+        speed_tracker.finalize()
+        metrics.finalize()
 
-    # Passed rate: recognized plates / unique vehicles
-    total_vehicles = speed_tracker.stats["unique_vehicles"]
-    passed_plates = len(recognizer.passed_results)
-    passed_pct = (passed_plates / total_vehicles * 100) if total_vehicles > 0 else 0
-    print(f"\nPassed: {passed_plates}/{total_vehicles} ({passed_pct:.1f}%)")
+        # --- Client report ---
+        duration_sec = time.time() - run_start_epoch
+        coords = cfg.get("coordinates")
+        coords = tuple(coords) if coords else None
+        report_gen = ReportGenerator(out_dir, name, speed_limit,
+                                         address=cfg.get("address", ""),
+                                         coordinates=coords)
+        vid_path = video_out_path if video_writer is not None else None
+        report_gen.generate(
+            passed_results=recognizer.passed_results,
+            speed_tracker=speed_tracker,
+            video_path=vid_path,
+            start_time=run_start_time,
+            duration_sec=duration_sec,
+        )
 
-    print(f"Done: {name}")
+        # Passed rate: recognized plates / unique vehicles
+        total_vehicles = speed_tracker.stats["unique_vehicles"]
+        passed_plates = len(recognizer.passed_results)
+        passed_pct = (passed_plates / total_vehicles * 100) if total_vehicles > 0 else 0
+        print(f"\nPassed: {passed_plates}/{total_vehicles} ({passed_pct:.1f}%)")
+
+        print(f"Done: {name}")
 
 
 if __name__ == "__main__":
