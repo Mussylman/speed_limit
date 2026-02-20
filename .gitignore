@@ -21,7 +21,8 @@ ultralytics/
 models/*.engine
 models/*.onnx
 models/*.pt
-models/*.pb
+*.pt
+*.engine
 
 # === Видео (тяжёлые файлы) ===
 videos/*
@@ -52,3 +53,10 @@ Thumbs.db
 *.sln
 *.sw?
 *.log
+
+# === Временные / эксперименты ===
+ocr_experiments/
+compute_homography.py
+=4.25.1
+*.png
+korgen_vision_v1.0.zip
