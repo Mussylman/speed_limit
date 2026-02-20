@@ -109,3 +109,14 @@ speed_limit/
 - [Выходные данные](docs/output.md)
 - [Утилиты](docs/tools.md)
 - [Калибровка](docs/calibration.md)
+
+## Контрольная сумма
+
+| Параметр | Значение |
+|----------|----------|
+| Версия | v1.0 |
+| Файл дистрибутива | `korgen_vision_v1.0.zip` |
+| Размер | 349 020 байт |
+| Git commit | `538fdf9a8b8453ea2bd3e41c470b5d88ab752740` |
+| **SHA-256** | `d1240bd843d2917fa3eba0d91d37378d589b72f05ced4f74ffb5ef68d4f47751` |
+| MD5 | `cf1df7bd742a65cf01fc690f2da0aa69` |
